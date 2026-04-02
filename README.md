@@ -28,7 +28,7 @@ Le pack est concu pour vivre a la **racine du depot applicatif** (meme niveau qu
 
 1. **Copier ou fusionner** l'integralite du dossier `assistant-copilot` a la racine du projet cible : conserver la structure (`skills/`, `personas/`, `templates/`, `checklists/`, `scripts/`, `examples/`, [module.yaml](module.yaml), [.github/](.github/)).
 2. **Fusionner `.github/`** si le depot en a deja un : ne pas supprimer vos `workflows/` ; ajouter ou fusionner `prompts/`, `instructions/` et [copilot-instructions.md](.github/copilot-instructions.md) (combiner avec vos regles existantes pour eviter les contradictions).
-3. **Configurer le module** : editer [module.yaml](module.yaml) (chemins `.sln`, `build_command` / `test_command`, `primary_runtime`, dossiers d'artefacts `docs/`).
+3. **Configurer le module** : editer [module.yaml](module.yaml) a la main, ou lancer le prompt **`acp-bootstrap-module`** (questions guidees par Copilot, priorite aux chemins et a la solution `.sln` ; commandes `dotnet` en defaut si runtime dotnet — voir [templates/module-bootstrap-flow.md](templates/module-bootstrap-flow.md)).
 4. **Contexte projet** : copier [templates/project-context.template.md](templates/project-context.template.md) vers `docs/project-context.md` et le remplir.
 5. **Conventions projet (optionnel)** : copier [templates/copilot-project-conventions.template.md](templates/copilot-project-conventions.template.md) vers `docs/copilot-project-conventions.md` et le remplir — regles equipe / produit qui completent le pack (voir [Conventions](#conventions)).
 6. **VS Code** : activer les fichiers prompt dans le workspace, par exemple dans `.vscode/settings.json` :
@@ -58,7 +58,7 @@ Voir `examples/orchestrator-idea-flow.md`.
 
 ## Quick Start (parcours classique)
 
-1. Completer `module.yaml` pour votre projet (notamment `primary_runtime` ; defaut `dotnet`).
+1. Completer `module.yaml` pour votre projet (notamment `primary_runtime` ; defaut `dotnet`) — a la main ou via le prompt **`acp-bootstrap-module`** pour un parcours question par question.
 2. Remplir `templates/project-context.template.md` en `docs/project-context.md`.
 3. Valider le module : `checklists/module-yaml-validation.md` ; sous Windows, `powershell -File scripts/validate-module.ps1` depuis la racine du pack.
 4. Si `primary_runtime` est **`dotnet`**, lancer les skills dans cet ordre:
@@ -82,6 +82,7 @@ Si `primary_runtime` est **`python`**, **`polyglot`** ou **`other`** : conserver
 
 ### Skills complementaires (selon contexte)
 
+- `acp-bootstrap-module` : guider le remplissage de `module.yaml` (chemins, runtime, `.sln`, dossiers `docs/` ; commandes allegees si dotnet).
 - `acp-compose-prompt-dotnet` : a partir d'un besoin court, choisir persona / skill `acp-*` et **rediger seulement** le prompt Copilot final (sans code ni modification de fichiers).
 - `acp-test-strategy-dotnet` : une fois en debut de projet ou avant une release majeure.
 - `acp-record-adr-dotnet` + `templates/adr.template.md` : decisions d'architecture structurantes.
@@ -189,12 +190,12 @@ assistant-copilot/
 - Skills: `skills/acp-*/SKILL.md`
 - Contraintes globales skills : `templates/skill-global-constraints.md`
 - Profils runtime : `templates/runtime-profiles.md`
-- Templates: `templates/*.template.*` (dont `adr.template.md`, `project-context.template.md`, `copilot-project-conventions.template.md`, `idea-prompt-pack.template.md`)
+- Templates: `templates/*.template.*` (dont `adr.template.md`, `project-context.template.md`, `copilot-project-conventions.template.md`, `idea-prompt-pack.template.md`) ; flux `module.yaml` : `templates/module-bootstrap-flow.md`
 - CI/CD templates: `templates/ci-cd/*`
 - Standards: `templates/dotnet-sqlserver-standards.md`, `templates/powershell-standards.md`
 - Checklists: `checklists/*.md` (dont `module-yaml-validation.md`, `observability-post-release.md`)
 - Scripts: `scripts/validate-module.ps1`
-- GitHub Copilot: `.github/copilot-instructions.md`, `.github/prompts/*.prompt.md` (dont messaging, observabilite Splunk/Dynatrace, logging, filetransfer, Denodo, Control-M), `.github/instructions/*.instructions.md`
+- GitHub Copilot: `.github/copilot-instructions.md`, `.github/prompts/*.prompt.md` (dont `acp-bootstrap-module`, messaging, observabilite Splunk/Dynatrace, logging, filetransfer, Denodo, Control-M), `.github/instructions/*.instructions.md`
 - Guides d'adoption:
   - `examples/day-1-onboarding.md`
   - `examples/flow-simulation.md`

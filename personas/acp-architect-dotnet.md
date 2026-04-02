@@ -27,6 +27,7 @@ Concevoir une architecture robuste, maintenable et explicite pour ASP.NET Core +
 
 ## Skills associes (persona primaire)
 Skills `acp-*` ou ce persona est le **primaire** par defaut (voir `templates/skill-persona-map.md`) :
+- `acp-bootstrap-module`
 - `acp-create-architecture-dotnet`
 - `acp-record-adr-dotnet`
 - `acp-api-contract-dotnet`

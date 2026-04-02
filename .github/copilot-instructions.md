@@ -4,7 +4,7 @@ Ce depot (ou copie fusionnee a la **racine** du depot applicatif) definit une me
 
 ## A lire en priorite
 
-- Configuration : `#file:../module.yaml` (chemins, commandes build/test/format, langues).
+- Configuration : `#file:../module.yaml` (chemins, commandes build/test/format, langues). Remplissage guide par questions : `#file:./prompts/acp-bootstrap-module.prompt.md` + `#file:../templates/module-bootstrap-flow.md`.
 - Contexte projet : `#file:../docs/project-context.md` si present.
 - Profils runtime : `#file:../templates/runtime-profiles.md`
 - Standards code et donnees (dotnet) : `#file:../templates/dotnet-sqlserver-standards.md`

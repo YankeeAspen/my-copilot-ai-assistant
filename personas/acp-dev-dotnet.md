@@ -40,6 +40,7 @@ Implementer les stories de maniere incrementale avec tests et non-regression.
 - `acp-powershell-automation`
 
 ## Skills avec ce persona en secondaire (optionnel)
+- `acp-bootstrap-module`
 - `acp-api-contract-dotnet`
 - `acp-cicd-quality-gates`
 - `acp-observability-dotnet`

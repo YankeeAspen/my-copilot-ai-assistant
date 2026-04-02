@@ -13,6 +13,7 @@ Reference unique pour le **persona primaire** (et **secondaire** optionnel) asso
 | Skill | Persona primaire | Persona secondaire |
 |-------|------------------|---------------------|
 | acp-help | *(aucun — voir regles)* | — |
+| acp-bootstrap-module | `personas/acp-architect-dotnet.md` | `personas/acp-dev-dotnet.md` |
 | acp-compose-prompt-dotnet | `personas/acp-pm-dotnet.md` | `personas/acp-architect-dotnet.md` |
 | acp-create-prd | `personas/acp-pm-dotnet.md` | — |
 | acp-create-epics-stories | `personas/acp-pm-dotnet.md` | — |
@@ -50,7 +51,7 @@ Reference unique pour le **persona primaire** (et **secondaire** optionnel) asso
 ## Index par persona (primaire)
 
 - **PM** (`acp-pm-dotnet`) : `acp-compose-prompt-dotnet`, `acp-create-prd`, `acp-create-epics-stories`, `acp-orchestrator-idea`
-- **Architecte** (`acp-architect-dotnet`) : `acp-create-architecture-dotnet`, `acp-record-adr-dotnet`, `acp-api-contract-dotnet`, `acp-cicd-quality-gates`, `acp-observability-dotnet`, `acp-perf-audit-dotnet-sql`, `acp-messaging-kafka-dotnet`, `acp-messaging-ibmmq-dotnet`, `acp-logging-serilog-nlog-dotnet`, `acp-observability-splunk-dotnet`, `acp-observability-dynatrace-dotnet`, `acp-integration-filetransfer-dotnet`, `acp-integration-denodo-dotnet`, `acp-integration-controlm`, `acp-release-orchestrator-dotnet`, `acp-expert-ia`
+- **Architecte** (`acp-architect-dotnet`) : `acp-bootstrap-module`, `acp-create-architecture-dotnet`, `acp-record-adr-dotnet`, `acp-api-contract-dotnet`, `acp-cicd-quality-gates`, `acp-observability-dotnet`, `acp-perf-audit-dotnet-sql`, `acp-messaging-kafka-dotnet`, `acp-messaging-ibmmq-dotnet`, `acp-logging-serilog-nlog-dotnet`, `acp-observability-splunk-dotnet`, `acp-observability-dynatrace-dotnet`, `acp-integration-filetransfer-dotnet`, `acp-integration-denodo-dotnet`, `acp-integration-controlm`, `acp-release-orchestrator-dotnet`, `acp-expert-ia`
 - **QA** (`acp-qa-dotnet`) : `acp-test-strategy-dotnet`
 - **Developpeur** (`acp-dev-dotnet`) : `acp-dev-story-dotnet`, `acp-build-solution-dotnet`, `acp-correct-solution-dotnet`, `acp-quick-dev-dotnet`, `acp-ci-github-actions-dotnet`, `acp-ci-azure-devops-dotnet`, `acp-rollback-dotnet`, `acp-powershell-automation`
 - **DB SQL Server** (`acp-db-sqlserver`) : `acp-db-schema-sqlserver`, `acp-db-migration-sqlserver`
