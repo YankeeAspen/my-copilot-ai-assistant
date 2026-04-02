@@ -1,0 +1,35 @@
+name: dotnet-cd
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: "dev|stage|prod"
+        required: true
+        default: "dev"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target_env }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build artifact
+        run: dotnet publish --configuration Release -o out
+
+      - name: Deploy application
+        run: echo "Deploy to ${{ inputs.target_env }} here"
+
+      - name: Smoke tests
+        run: echo "Run smoke tests here"
+
+      - name: Rollback hook
+        if: failure()
+        run: echo "Trigger rollback workflow here"

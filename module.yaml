@@ -1,0 +1,95 @@
+code: acp
+name: "Assistant Copilot — delivery logiciel (profils runtime)"
+description: "Methode Copilot-only pour delivery logiciel avec garde-fous qualite, securite et performance. Profil de reference : .NET + SQL Server ; autres runtimes via module.yaml et project-context."
+
+project_name:
+  prompt: "Nom du projet"
+  default: "{directory_name}"
+  result: "{value}"
+
+communication_language:
+  prompt: "Langue de communication"
+  default: "Francais"
+  result: "{value}"
+
+document_output_language:
+  prompt: "Langue des documents"
+  default: "Francais"
+  result: "{value}"
+
+user_skill_level:
+  prompt: "Niveau de l'equipe"
+  default: "intermediate"
+  result: "{value}"
+  single-select:
+    - value: "beginner"
+      label: "Debutant"
+    - value: "intermediate"
+      label: "Intermediaire"
+    - value: "expert"
+      label: "Expert"
+
+primary_runtime:
+  prompt: "Runtime / stack principal du depot"
+  default: "dotnet"
+  result: "{value}"
+  single-select:
+    - value: "dotnet"
+      label: ".NET (reference du pack)"
+    - value: "python"
+      label: "Python"
+    - value: "polyglot"
+      label: "Polyglot (plusieurs runtimes)"
+    - value: "other"
+      label: "Autre (preciser dans project-context)"
+
+planning_artifacts:
+  prompt: "Dossier des artefacts de planning"
+  default: "docs/planning"
+  result: "{project-root}/{value}"
+
+architecture_artifacts:
+  prompt: "Dossier des artefacts d'architecture"
+  default: "docs/architecture"
+  result: "{project-root}/{value}"
+
+implementation_artifacts:
+  prompt: "Dossier des artefacts d'implementation"
+  default: "docs/implementation"
+  result: "{project-root}/{value}"
+
+runbooks_artifacts:
+  prompt: "Dossier des runbooks"
+  default: "docs/runbooks"
+  result: "{project-root}/{value}"
+
+dotnet_solution_path:
+  prompt: "Chemin du fichier .sln (pertinent si primary_runtime = dotnet)"
+  default: "{project-root}/src/{project_name}.sln"
+  result: "{value}"
+
+test_command:
+  prompt: "Commande de tests"
+  default: "dotnet test"
+  result: "{value}"
+
+build_command:
+  prompt: "Commande de build"
+  default: "dotnet build"
+  result: "{value}"
+
+format_command:
+  prompt: "Commande de format/lint"
+  default: "dotnet format"
+  result: "{value}"
+
+database_provider:
+  prompt: "Base cible"
+  default: "sqlserver"
+  result: "{value}"
+
+directories:
+  - "{planning_artifacts}"
+  - "{architecture_artifacts}"
+  - "{implementation_artifacts}"
+  - "{runbooks_artifacts}"

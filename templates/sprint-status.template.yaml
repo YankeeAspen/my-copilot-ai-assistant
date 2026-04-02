@@ -1,0 +1,14 @@
+last_updated: YYYY-MM-DD
+current_sprint: sprint-1
+
+development_status:
+  epic-1: in-progress
+  1-1-sample-story: ready-for-dev
+  1-2-sample-story: backlog
+
+status_definitions:
+  backlog: "Story identifiee mais non preparee"
+  ready-for-dev: "Story prete pour implementation"
+  in-progress: "Implementation en cours"
+  review: "En revue code/qa/securite"
+  done: "Validee et terminee"
