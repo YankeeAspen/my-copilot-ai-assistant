@@ -1,0 +1,42 @@
+# Template pipeline CI Azure DevOps (YAML) — runtime agnostique
+# Placer selon la convention du repo (ex. azure-pipelines.yml ou ci/azure-pipelines.yml)
+# et lier la definition dans Azure DevOps.
+#
+# Mapper module.yaml :
+#   format_command, build_command, test_command -> etapes script / bash / PowerShell@2 / taches officielles
+#
+# Ajuster pool (vmImage ou nom de pool self-hosted) selon docs/project-context.md
+
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - '*'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+  - checkout: self
+
+  - script: |
+      set -euo pipefail
+      echo "Configurer : inserer format_command depuis module.yaml ou supprimer cette etape"
+      true
+    displayName: 'Format / lint (a configurer)'
+
+  - script: |
+      set -euo pipefail
+      echo "Configurer : inserer build_command depuis module.yaml"
+      true
+    displayName: 'Build (a configurer)'
+
+  - script: |
+      set -euo pipefail
+      echo "Configurer : inserer test_command depuis module.yaml"
+      true
+    displayName: 'Test (a configurer)'

@@ -27,3 +27,7 @@ Produire des migrations SQL Server sures et rollbackables.
 ## Definition de "done"
 - script relu
 - rollback documente
+
+## Note CI (depot SQL / infra)
+
+Si le repository est surtout des scripts SQL ou de l'infra sans application .NET, declarer `delivery_profile` dans `docs/project-context.md` et utiliser `acp-ci-github-actions-generic` ou `acp-ci-azure-devops-generic` pour brancher `build_command` / `test_command` sur la validation SQL (outil Flyway, sqlcmd, tests base, etc.) au lieu des skills `acp-ci-*-dotnet`.

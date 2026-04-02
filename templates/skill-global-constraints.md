@@ -11,7 +11,8 @@ A appliquer **avant** tout workflow defini dans un `skills/acp-*/SKILL.md`.
    - `build_command`, `test_command`, `format_command` (tout runtime)
    - `planning_artifacts`, `architecture_artifacts`, `implementation_artifacts`, `runbooks_artifacts`
 4. Si present, lire `docs/project-context.md` et l'aligner sur le module.
-5. Si present, lire `docs/copilot-project-conventions.md` et l'appliquer **en complement** des sections ci-dessous (langue, qualite, stack). Ce fichier contient les regles **projet / equipe** ; il ne remplace pas les interdits du pack (secrets, gates minimales, flux release documente).
+5. Si present, lire `docs/delivery-state.md` **en meme temps** que le contexte projet : c'est la memoire de session de livraison (phase, DOD, prochaine action). Ne pas la contredire sans proposer une mise a jour du fichier.
+6. Si present, lire `docs/copilot-project-conventions.md` et l'appliquer **en complement** des sections ci-dessous (langue, qualite, stack). Ce fichier contient les regles **projet / equipe** ; il ne remplace pas les interdits du pack (secrets, gates minimales, flux release documente).
 
 ## Langue
 

@@ -1,0 +1,33 @@
+# Exemple GitHub Actions — depot ou partie du CI centree sur PowerShell
+# A combiner ou a adapter avec github-actions-generic-ci.yml selon le projet.
+# module.yaml : mapper format_command -> PSScriptAnalyzer, test_command -> Pester si applicable.
+# Voir skills/acp-powershell-automation et templates/powershell-standards.md
+
+name: powershell-ci
+
+on:
+  pull_request:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  powershell-quality:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: PSScriptAnalyzer (configurer)
+        shell: pwsh
+        run: |
+          Write-Host 'Configurer : Invoke-ScriptAnalyzer ou commande du module.yaml format_command'
+          # Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          # Invoke-ScriptAnalyzer -Path ./scripts -Recurse
+
+      - name: Pester (configurer)
+        shell: pwsh
+        run: |
+          Write-Host 'Configurer : Invoke-Pester ou test_command du module.yaml'
+          # Install-Module Pester -Scope CurrentUser -MinimumVersion 5.0 -Force
+          # Invoke-Pester -CI

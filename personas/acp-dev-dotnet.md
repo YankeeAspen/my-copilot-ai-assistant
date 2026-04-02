@@ -35,7 +35,9 @@ Implementer les stories de maniere incrementale avec tests et non-regression.
 - `acp-correct-solution-dotnet`
 - `acp-quick-dev-dotnet`
 - `acp-ci-github-actions-dotnet`
+- `acp-ci-github-actions-generic`
 - `acp-ci-azure-devops-dotnet`
+- `acp-ci-azure-devops-generic`
 - `acp-rollback-dotnet`
 - `acp-powershell-automation`
 

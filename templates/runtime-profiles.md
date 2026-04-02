@@ -27,3 +27,25 @@ Les skills `acp-messaging-*-dotnet`, `acp-logging-serilog-nlog-dotnet`, `acp-obs
 
 - Preciser dans `project-context.md` chaque runtime, ses commandes et les dossiers sources.
 - Reutiliser `acp-cicd-quality-gates`, checklists release/securite, `acp-record-adr-dotnet` (contenu runtime-agnostique) autant que possible.
+
+## Depot principalement YAML (CI / infra)
+
+- Cas : repository centre sur des **pipelines** GitHub Actions ou Azure DevOps, IaC, ou livrables YAML sans application .NET dans le meme depot.
+- `primary_runtime` : souvent **`other`** ou **`polyglot`** ; renseigner `delivery_profile: ci_yaml_only` (ou equivalent) dans `docs/project-context.md`.
+- **Skills CI** : `acp-ci-github-actions-generic`, `acp-ci-azure-devops-generic` — YAML pilote par `module.yaml` (`format_command`, `build_command`, `test_command`) et `project-context` (triggers, chemins, runners).
+- **Ne pas forcer** `acp-ci-github-actions-dotnet` / `acp-ci-azure-devops-dotnet` sauf si le depot contient reellement du .NET a builder.
+- Gates : adapter `acp-cicd-quality-gates` (pas de binaire .NET obligatoire ; s'appuyer sur les commandes declarees et scans secrets / qualite YAML si politique equipe).
+
+## Scripts SQL seuls (depot sans app metier)
+
+- Cas : migrations / scripts `.sql`, eventuellement outil de deploiement schema.
+- Declarer `delivery_profile: sql_scripts` et l'outil (Flyway, Liquibase, sqlcmd, SSDT, etc.) dans `project-context.md`.
+- **Skills** : `acp-db-schema-sqlserver`, `acp-db-migration-sqlserver` si SQL Server ; sinon adapter la demarche dans le contexte.
+- **CI** : `acp-ci-github-actions-generic` ou `acp-ci-azure-devops-generic` avec `build_command` / `test_command` pointant vers validation SQL (syntaxe, dry-run, tests base) selon l'outil.
+
+## Depot PowerShell seul
+
+- Cas : modules `.psm1`, scripts d'automation, peu ou pas d'autre runtime.
+- Declarer `delivery_profile: powershell` dans `project-context.md`.
+- **Skill** : `acp-powershell-automation` + `templates/powershell-standards.md`.
+- **CI** : `acp-ci-github-actions-generic` (ou Azure DevOps generique) avec etapes `pwsh` / Pester / `Invoke-Build` ; exemple optionnel : `templates/ci-cd/github-actions-powershell-ci.yml`.

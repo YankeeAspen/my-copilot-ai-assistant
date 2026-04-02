@@ -26,7 +26,7 @@ Concevoir, modifier ou integrer du **PowerShell** pour scripts locaux (`.ps1`, `
 
 ### B. CI / CD
 
-1. Identifier le moteur : GitHub Actions ou Azure DevOps (ou les deux) ; s'appuyer sur `acp-ci-github-actions-dotnet` / `acp-ci-azure-devops-dotnet` pour la **forme** du workflow YAML, independamment du runtime applicatif.
+1. Identifier le moteur : GitHub Actions ou Azure DevOps (ou les deux). Pour la **forme** du workflow YAML : si le depot build du .NET, s'appuyer sur `acp-ci-github-actions-dotnet` / `acp-ci-azure-devops-dotnet` ; sinon `acp-ci-github-actions-generic` / `acp-ci-azure-devops-generic` et l'exemple `templates/ci-cd/github-actions-powershell-ci.yml` si utile.
 2. Pour les steps PowerShell :
    - GitHub Actions : `shell: pwsh` quand PowerShell 7+ est requis.
    - Azure DevOps : `PowerShell@2` avec `pwsh: true` si besoin.

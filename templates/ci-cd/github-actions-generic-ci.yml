@@ -1,0 +1,52 @@
+# Template CI GitHub Actions — runtime agnostique
+# Copier vers .github/workflows/ et adapter le nom du fichier + la cle "name:".
+#
+# Renseigner les commandes depuis module.yaml :
+#   - format_command  -> etape "Format / lint" (supprimer l'etape si vide / N/A)
+#   - build_command   -> etape "Build"
+#   - test_command    -> etape "Test"
+# Ajuster runs-on (ubuntu-latest, windows-latest, macos-latest, self-hosted) selon docs/project-context.md
+
+name: generic-ci
+
+on:
+  pull_request:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- Remplacer les trois blocs suivants par les commandes reelles du module.yaml ---
+
+      - name: Format / lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Exemple : copier-coller ici la valeur de format_command (une ou plusieurs lignes)
+          echo "Configurer : inserer format_command depuis module.yaml ou supprimer cette etape"
+          true
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Configurer : inserer build_command depuis module.yaml"
+          true
+
+      - name: Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Configurer : inserer test_command depuis module.yaml"
+          true
+
+      # --- Optionnel : scan dependances / secrets selon acp-cicd-quality-gates et le stack ---

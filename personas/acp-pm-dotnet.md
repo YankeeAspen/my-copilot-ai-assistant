@@ -31,6 +31,7 @@ Skills `acp-*` ou ce persona est le **primaire** par defaut (voir `templates/ski
 - `acp-create-prd`
 - `acp-create-epics-stories`
 - `acp-orchestrator-idea`
+- `acp-delivery-orchestrator`
 
 ## Skills avec ce persona en secondaire (optionnel)
 - `acp-release-orchestrator-dotnet`

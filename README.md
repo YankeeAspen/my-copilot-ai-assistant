@@ -31,6 +31,7 @@ Le pack est concu pour vivre a la **racine du depot applicatif** (meme niveau qu
 3. **Configurer le module** : editer [module.yaml](module.yaml) a la main, ou lancer le prompt **`acp-bootstrap-module`** (questions guidees par Copilot, priorite aux chemins et a la solution `.sln` ; commandes `dotnet` en defaut si runtime dotnet — voir [templates/module-bootstrap-flow.md](templates/module-bootstrap-flow.md)).
 4. **Contexte projet** : copier [templates/project-context.template.md](templates/project-context.template.md) vers `docs/project-context.md` et le remplir.
 5. **Conventions projet (optionnel)** : copier [templates/copilot-project-conventions.template.md](templates/copilot-project-conventions.template.md) vers `docs/copilot-project-conventions.md` et le remplir — regles equipe / produit qui completent le pack (voir [Conventions](#conventions)).
+5b. **Session livraison (optionnel)** : copier [templates/delivery-state.template.md](templates/delivery-state.template.md) vers `docs/delivery-state.md` et utiliser le prompt `acp-delivery-orchestrator` pour piloter phase / DOD dans le depot (voir [Session de livraison](#session-de-livraison-memoire-dans-le-depot)).
 6. **VS Code** : activer les fichiers prompt dans le workspace, par exemple dans `.vscode/settings.json` :
    ```json
    "chat.promptFiles": true
@@ -56,6 +57,10 @@ Si vous partez d'une **phrase d'idee** (nouveau besoin, greenfield, nouveau proj
 
 Voir `examples/orchestrator-idea-flow.md`.
 
+## Session de livraison (memoire dans le depot)
+
+Pour ne **pas perdre le fil** entre messages Copilot : tenir un fichier d'etat **`docs/delivery-state.md`** (copie de [templates/delivery-state.template.md](templates/delivery-state.template.md)) et une **Definition of Done** sous `docs/dod/<feature>.md` ([templates/dod.template.md](templates/dod.template.md)). Lancer le prompt **`acp-delivery-orchestrator`** ([.github/prompts/acp-delivery-orchestrator.prompt.md](.github/prompts/acp-delivery-orchestrator.prompt.md)) : orchestration des phases (analyse, affinage, gel DOD, implementation, build/test, verification contre la DOD) avec personas choisis selon [templates/skill-persona-map.md](templates/skill-persona-map.md). Les instructions [`.github/copilot-instructions.md`](.github/copilot-instructions.md) imposent de **lire** ce state quand il existe et de **mettre a jour** le fichier apres les decisions. Les etapes implementation / build / revue utilisent les **prompts existants** (`acp-dev-story-dotnet`, etc.) en **reattachant** `docs/delivery-state.md` et le fichier DOD. A distinguer de **`acp-orchestrator-idea`** (greenfield, prompt pack).
+
 ## Quick Start (parcours classique)
 
 1. Completer `module.yaml` pour votre projet (notamment `primary_runtime` ; defaut `dotnet`) — a la main ou via le prompt **`acp-bootstrap-module`** pour un parcours question par question.
@@ -73,16 +78,21 @@ Voir `examples/orchestrator-idea-flow.md`.
    - `acp-security-check-dotnet`
    - `acp-perf-audit-dotnet-sql` (si hot path / charge / SQL sensible)
    - `acp-cicd-quality-gates`
-   - `acp-ci-github-actions-dotnet` et/ou `acp-ci-azure-devops-dotnet`
+   - `acp-ci-github-actions-dotnet` et/ou `acp-ci-azure-devops-dotnet` (ou `acp-ci-github-actions-generic` / `acp-ci-azure-devops-generic` si pas de build .NET)
    - `acp-release-orchestrator-dotnet`
    - `acp-rollback-dotnet` (uniquement en incident post-deploiement, pas une etape lineaire)
 5. Passer les checklists `checklists/*.md` avant merge/release.
 
 Si `primary_runtime` est **`python`**, **`polyglot`** ou **`other`** : conserver `acp-create-prd`, `acp-create-epics-stories`, `acp-cicd-quality-gates`, checklists et ADR ; remplacer les etapes `*-dotnet` par les memes **intentions** (story, build, test, review, securite) en utilisant les commandes du `module.yaml` et le detail dans `docs/project-context.md` (voir `templates/runtime-profiles.md`).
 
+#### Projets sans code applicatif .NET
+
+Depots centres sur des **pipelines YAML** (GitHub Actions / Azure DevOps), **scripts SQL**, **PowerShell** ou **infra** sans solution `.sln` : declarer `delivery_profile` et les chemins CI dans `docs/project-context.md` (voir [templates/project-context.template.md](templates/project-context.template.md) et [templates/runtime-profiles.md](templates/runtime-profiles.md)). Pour generer ou ajuster les workflows, utiliser **`acp-ci-github-actions-generic`** ou **`acp-ci-azure-devops-generic`** (prompts `.github/prompts/acp-ci-github-actions-generic.prompt.md`, `acp-ci-azure-devops-generic.prompt.md`) et les templates sous `templates/ci-cd/github-actions-generic-ci.yml`, `azure-devops-generic-ci.yml` ; exemple PowerShell : `templates/ci-cd/github-actions-powershell-ci.yml`. Ne pas imposer `acp-ci-*-dotnet` si le depot ne build pas du .NET.
+
 ### Skills complementaires (selon contexte)
 
 - `acp-bootstrap-module` : guider le remplissage de `module.yaml` (chemins, runtime, `.sln`, dossiers `docs/` ; commandes allegees si dotnet).
+- `acp-delivery-orchestrator` : session de livraison avec `docs/delivery-state.md`, DOD fichier sous `docs/dod/`, enchainement des prompts `acp-*` (voir [Session de livraison](#session-de-livraison-memoire-dans-le-depot)).
 - `acp-compose-prompt-dotnet` : a partir d'un besoin court, choisir persona / skill `acp-*` et **rediger seulement** le prompt Copilot final (sans code ni modification de fichiers).
 - `acp-test-strategy-dotnet` : une fois en debut de projet ou avant une release majeure.
 - `acp-record-adr-dotnet` + `templates/adr.template.md` : decisions d'architecture structurantes.
@@ -119,9 +129,9 @@ Chaque skill `acp-*` indique un **persona primaire** (et un secondaire optionnel
 
 ## Extensions (hors socle)
 
-Non fournies dans ce pack ; a adapter en copiant la structure des skills CI existants :
+Non fournies dans ce pack sauf mention contraire ; a adapter en copiant la structure des skills CI existants :
 
-- **GitLab CI** : modele `skills/acp-ci-github-actions-dotnet/SKILL.md` + YAML equivalent.
+- **GitLab CI** : modele `skills/acp-ci-github-actions-dotnet/SKILL.md` ou `skills/acp-ci-github-actions-generic/SKILL.md` + YAML equivalent.
 - **Docker / Kubernetes** : ajouter templates et un skill dedie si besoin.
 - **PostgreSQL** (ou autre SGBD) : dupliquer les skills `acp-db-*-sqlserver` et les standards associés.
 - **Skills Python / Node** dedies : non inclus dans cette version ; prevus comme extension sur le meme squelette (commandes dans `module.yaml`).
@@ -147,7 +157,7 @@ Autres points :
 ```text
 assistant-copilot/
   module.yaml
-  docs/                    # apres installation : project-context.md ; optionnel copilot-project-conventions.md
+  docs/                    # project-context.md ; optionnel copilot-project-conventions.md, delivery-state.md, dod/
   .github/
     copilot-instructions.md
     instructions/
@@ -172,13 +182,13 @@ assistant-copilot/
 5. Construire la solution (`acp-build-solution-dotnet`)
 6. Corriger les echecs (`acp-correct-solution-dotnet`) puis reconstruire jusqu'au vert
 7. Valider (`acp-code-review-dotnet`, `acp-security-check-dotnet`, `acp-perf-audit-dotnet-sql` si pertinent)
-8. Gates CI/CD (`acp-cicd-quality-gates`, puis pipelines `acp-ci-github-actions-dotnet` / `acp-ci-azure-devops-dotnet`)
+8. Gates CI/CD (`acp-cicd-quality-gates`, puis pipelines `acp-ci-github-actions-dotnet` / `acp-ci-azure-devops-dotnet` ; si depot **sans .NET** : `acp-ci-github-actions-generic` / `acp-ci-azure-devops-generic`)
 9. Release (`acp-release-orchestrator-dotnet`, `checklists/release-gate.md`)
 
 ## Flux CI/CD enterprise
 
 1. Build local + tests
-2. CI pipeline (`acp-ci-github-actions-dotnet` ou `acp-ci-azure-devops-dotnet`)
+2. CI pipeline (`acp-ci-github-actions-dotnet` ou `acp-ci-azure-devops-dotnet` ; hors .NET : `acp-ci-github-actions-generic` ou `acp-ci-azure-devops-generic`)
 3. Quality gates (`acp-cicd-quality-gates`)
 4. Promotion environnements (`acp-release-orchestrator-dotnet`)
 5. Monitoring post-deploiement (`acp-observability-dotnet`, `checklists/observability-post-release.md`, variables `templates/ci-cd/shared-variables.example.md`)
@@ -190,12 +200,12 @@ assistant-copilot/
 - Skills: `skills/acp-*/SKILL.md`
 - Contraintes globales skills : `templates/skill-global-constraints.md`
 - Profils runtime : `templates/runtime-profiles.md`
-- Templates: `templates/*.template.*` (dont `adr.template.md`, `project-context.template.md`, `copilot-project-conventions.template.md`, `idea-prompt-pack.template.md`) ; flux `module.yaml` : `templates/module-bootstrap-flow.md`
-- CI/CD templates: `templates/ci-cd/*`
+- Templates: `templates/*.template.*` (dont `adr.template.md`, `project-context.template.md`, `copilot-project-conventions.template.md`, `idea-prompt-pack.template.md`, `delivery-state.template.md`, `dod.template.md`) ; flux `module.yaml` : `templates/module-bootstrap-flow.md`
+- CI/CD templates: `templates/ci-cd/*` (dont `github-actions-generic-ci.yml`, `azure-devops-generic-ci.yml`, `github-actions-powershell-ci.yml` en complement des variantes `*dotnet*`)
 - Standards: `templates/dotnet-sqlserver-standards.md`, `templates/powershell-standards.md`
 - Checklists: `checklists/*.md` (dont `module-yaml-validation.md`, `observability-post-release.md`)
 - Scripts: `scripts/validate-module.ps1`
-- GitHub Copilot: `.github/copilot-instructions.md`, `.github/prompts/*.prompt.md` (dont `acp-bootstrap-module`, messaging, observabilite Splunk/Dynatrace, logging, filetransfer, Denodo, Control-M), `.github/instructions/*.instructions.md`
+- GitHub Copilot: `.github/copilot-instructions.md`, `.github/prompts/*.prompt.md` (dont `acp-bootstrap-module`, `acp-delivery-orchestrator`, `acp-ci-github-actions-generic`, `acp-ci-azure-devops-generic`, messaging, observabilite Splunk/Dynatrace, logging, filetransfer, Denodo, Control-M), `.github/instructions/*.instructions.md`
 - Guides d'adoption:
   - `examples/day-1-onboarding.md`
   - `examples/flow-simulation.md`
@@ -203,4 +213,5 @@ assistant-copilot/
   - `examples/copilot-setup.md`
   - `examples/framework-retro-metrics.md`
 - Orchestration idee: `skills/acp-orchestrator-idea/SKILL.md`
+- Orchestration livraison (etat fichier + DOD): `skills/acp-delivery-orchestrator/SKILL.md`
 - Expert IA (cadrage): `skills/acp-expert-ia/SKILL.md`

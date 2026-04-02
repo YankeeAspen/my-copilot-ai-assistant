@@ -50,7 +50,10 @@ Skills `acp-*` ou ce persona est le **primaire** par defaut (voir `templates/ski
 - `acp-orchestrator-idea`
 - `acp-test-strategy-dotnet`
 - `acp-ci-github-actions-dotnet`
+- `acp-ci-github-actions-generic`
 - `acp-ci-azure-devops-dotnet`
+- `acp-ci-azure-devops-generic`
+- `acp-delivery-orchestrator`
 - `acp-rollback-dotnet`
 - `acp-db-schema-sqlserver`
 
