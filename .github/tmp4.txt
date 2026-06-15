@@ -1,0 +1,864 @@
+//App 1
+
+//Program
+using IntegriteCBPFX.App;
+using IntegriteCBPFX.App.Features.Verification;
+using IntegriteCBPFX.SharedKernel.Abstractions;
+using IntegriteCBPFX.SharedKernel.Time;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using NLog;
+using NLog.Extensions.Logging;
+
+var logger = LogManager.GetCurrentClassLogger();
+
+try
+{
+    var builder = Host.CreateApplicationBuilder(args);
+
+    // Journalisation : NLog comme unique fournisseur, configuré depuis la section "NLog" d'appsettings.
+    builder.Logging.ClearProviders();
+    LogManager.Setup().LoadConfigurationFromSection(builder.Configuration);
+    builder.Logging.AddNLog();
+
+    // Services transverses + slice(s).
+    builder.Services.AddSingleton<IClock, SystemClock>();
+    builder.Services.AddVerificationFeature(builder.Configuration);
+
+    using var host = builder.Build();
+
+    VerificationMode mode;
+    try
+    {
+        mode = VerificationArgs.ResolveMode(args);
+    }
+    catch (FormatException ex)
+    {
+        logger.Error(ex, "Arguments de ligne de commande invalides.");
+        return ExitCodes.InvalidArguments;
+    }
+
+    // Annulation propre sur Ctrl+C / arrêt Control-M.
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, eventArgs) =>
+    {
+        eventArgs.Cancel = true;
+        cts.Cancel();
+    };
+
+    using var scope = host.Services.CreateScope();
+    var handler = scope.ServiceProvider.GetRequiredService<RunVerificationHandler>();
+
+    var result = await handler.HandleAsync(new RunVerificationCommand(mode), cts.Token);
+
+    return ExitCodes.FromResult(result);
+}
+catch (Exception ex)
+{
+    logger.Fatal(ex, "Échec inattendu de la vérification.");
+    return ExitCodes.UnexpectedError;
+}
+finally
+{
+    // Vide les buffers des targets NLog (important pour un batch court).
+    LogManager.Shutdown();
+}
+
+//End Program
+
+
+
+//VerificationArgs
+
+using IntegriteCBPFX.App.Features.Verification;
+
+namespace IntegriteCBPFX.App;
+
+/// <summary>
+/// Analyse des arguments de ligne de commande passés par Control-M.
+/// </summary>
+/// <remarks>
+/// Usage :
+///   IntegriteCBPFX                       -> mode Veille (défaut)
+///   IntegriteCBPFX Veille                -> fromTradeDate = J-1, toTradeDate = J
+///   IntegriteCBPFX JourneeCourante       -> fromTradeDate = toTradeDate = J
+///   IntegriteCBPFX --mode JourneeCourante / --mode=JourneeCourante
+/// </remarks>
+public static class VerificationArgs
+{
+    /// <summary>Résout le mode d'exécution à partir des arguments (défaut : Veille).</summary>
+    /// <exception cref="FormatException">Si un mode est fourni mais non reconnu.</exception>
+    public static VerificationMode ResolveMode(string[] args)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+
+        var raw = ExtractModeToken(args);
+        if (raw is null)
+        {
+            return VerificationMode.Veille;
+        }
+
+        if (!Enum.TryParse<VerificationMode>(raw, ignoreCase: true, out var mode))
+        {
+            throw new FormatException(
+                $"Mode invalide : « {raw} ». Valeurs attendues : {nameof(VerificationMode.Veille)}, {nameof(VerificationMode.JourneeCourante)}.");
+        }
+
+        return mode;
+    }
+
+    private static string? ExtractModeToken(string[] args)
+    {
+        for (var i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (arg.StartsWith("--mode=", StringComparison.OrdinalIgnoreCase))
+            {
+                return arg["--mode=".Length..];
+            }
+
+            if (arg.Equals("--mode", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+            {
+                return args[i + 1];
+            }
+
+            if (!arg.StartsWith('-'))
+            {
+                return arg; // argument positionnel
+            }
+        }
+
+        return null;
+    }
+}
+
+//EndVerificationArgs
+
+
+
+//ExitCodes
+
+using IntegriteCBPFX.App.Features.Verification;
+
+namespace IntegriteCBPFX.App;
+
+/// <summary>
+/// Codes de sortie du processus, interprétés par Control-M.
+/// Convention : 0 = OK (le job a tourné), &gt; 0 = échec technique du job.
+/// </summary>
+/// <remarks>
+/// La présence d'anomalies N'EST PAS un échec : le run a réussi, les anomalies
+/// sont des données métier (le Back-Office est alerté via la notification).
+/// Si Control-M doit brancher spécifiquement sur « anomalies détectées », ajouter
+/// ici un code dédié (p. ex. 10) et l'utiliser dans <see cref="FromResult"/>.
+/// </remarks>
+public static class ExitCodes
+{
+    /// <summary>Run terminé avec succès (avec ou sans anomalies).</summary>
+    public const int Success = 0;
+
+    /// <summary>Erreur inattendue (exception non gérée).</summary>
+    public const int UnexpectedError = 1;
+
+    /// <summary>Run en échec fonctionnel (p. ex. source indisponible / « API down »).</summary>
+    public const int VerificationFailed = 2;
+
+    /// <summary>Arguments de ligne de commande invalides.</summary>
+    public const int InvalidArguments = 3;
+
+    public static int FromResult(RunVerificationResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        return result.Succeeded ? Success : VerificationFailed;
+    }
+}
+
+//End ExitCodes
+
+
+//VerificationStore
+using Dapper;
+using IntegriteCBPFX.App.Common.Persistence;
+using IntegriteCBPFX.SharedKernel.Anomalies;
+using IntegriteCBPFX.SharedKernel.Verification;
+using Microsoft.Extensions.Logging;
+
+namespace IntegriteCBPFX.App.Features.Verification;
+
+/// <summary>
+/// Persistance Dapper des résultats (run + anomalies) dans le schéma cbp.
+/// Les tables sont créées par les DBA via les scripts de db/ — l'appli n'exécute que des INSERT/UPDATE.
+/// </summary>
+public sealed class VerificationStore(IIntegriteDbConnectionFactory connectionFactory, ILogger<VerificationStore> logger) : IVerificationStore
+{
+    private const string ExistsRunSql =
+        "SELECT COUNT(1) FROM cbp.VerificationRun WHERE Id = @Id;";
+
+    private const string InsertRunSql =
+        """
+        INSERT INTO cbp.VerificationRun
+            (Id, BusinessDate, Status, StartedAtUtc, CompletedAtUtc, CbpTransactionCount, FxTransactionCount, AnomalyCount, FailureReason)
+        VALUES
+            (@Id, @BusinessDate, @Status, @StartedAtUtc, @CompletedAtUtc, @CbpTransactionCount, @FxTransactionCount, @AnomalyCount, @FailureReason);
+        """;
+
+    private const string UpdateRunSql =
+        """
+        UPDATE cbp.VerificationRun
+        SET Status = @Status,
+            CompletedAtUtc = @CompletedAtUtc,
+            CbpTransactionCount = @CbpTransactionCount,
+            FxTransactionCount = @FxTransactionCount,
+            AnomalyCount = @AnomalyCount,
+            FailureReason = @FailureReason
+        WHERE Id = @Id;
+        """;
+
+    private const string InsertAnomalySql =
+        """
+        INSERT INTO cbp.AnomalyTransaction
+            (Id, DateCreationErreur, IdCBPTransaction, IdFxSentryTransaction, CodeErreur, DescriptionErreur, ChampsErreurs)
+        VALUES
+            (@Id, @DateCreationErreur, @IdCBPTransaction, @IdFxSentryTransaction, @CodeErreur, @DescriptionErreur, @ChampsErreurs);
+        """;
+
+    public async Task SaveRunAsync(VerificationRun run, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(run);
+
+        var parameters = new
+        {
+            run.Id,
+            run.BusinessDate,
+            Status = run.Status.ToString(),
+            run.StartedAtUtc,
+            run.CompletedAtUtc,
+            run.CbpTransactionCount,
+            run.FxTransactionCount,
+            run.AnomalyCount,
+            run.FailureReason,
+        };
+
+        using var connection = connectionFactory.Create();
+
+        var exists = await connection.ExecuteScalarAsync<long>(
+            new CommandDefinition(ExistsRunSql, new { run.Id }, cancellationToken: cancellationToken));
+
+        var sql = exists > 0 ? UpdateRunSql : InsertRunSql;
+        await connection.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken));
+
+        logger.LogDebug("Run {RunId} {Action} (statut {Status}).", run.Id, exists > 0 ? "mis à jour" : "inséré", run.Status);
+    }
+
+    public async Task AddAnomaliesAsync(IReadOnlyCollection<AnomalyTransaction> anomalies, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(anomalies);
+        if (anomalies.Count == 0)
+        {
+            return;
+        }
+
+        // Dapper exécute l'INSERT une fois par élément de la séquence.
+        var rows = anomalies.Select(a => new
+        {
+            a.Id,
+            a.DateCreationErreur,
+            a.IdCBPTransaction,
+            a.IdFxSentryTransaction,
+            CodeErreur = (int)a.CodeErreur,
+            a.DescriptionErreur,
+            a.ChampsErreurs,
+        });
+
+        using var connection = connectionFactory.Create();
+        var inserted = await connection.ExecuteAsync(new CommandDefinition(InsertAnomalySql, rows, cancellationToken: cancellationToken));
+
+        logger.LogDebug("{Count} anomalie(s) persistée(s).", inserted);
+    }
+}
+
+//End VerificationStore
+
+
+//VerificationModule
+
+using IntegriteCBPFX.App.Common.Persistence;
+using IntegriteCBPFX.SharedKernel.Comparison;
+using IntegriteCBPFX.SharedKernel.Verification;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+
+namespace IntegriteCBPFX.App.Features.Verification;
+
+/// <summary>
+/// Câblage DI de la slice Verification. Point d'entrée unique : le host appelle
+/// <c>AddVerificationFeature(configuration)</c> et toute la slice est enregistrée.
+/// </summary>
+public static class VerificationModule
+{
+    public static IServiceCollection AddVerificationFeature(this IServiceCollection services, IConfiguration configuration)
+    {
+        // --- Options validées ---
+        services.AddOptions<CbpApiOptions>()
+            .Bind(configuration.GetSection(CbpApiOptions.SectionName))
+            .ValidateDataAnnotations();
+
+        services.AddOptions<FxSentryOptions>()
+            .Bind(configuration.GetSection(FxSentryOptions.SectionName))
+            .ValidateDataAnnotations();
+
+        services.AddOptions<SecretServerOptions>()
+            .Bind(configuration.GetSection(SecretServerOptions.SectionName))
+            .ValidateDataAnnotations();
+
+        // --- Moteur de vérification (SharedKernel) ---
+        services.AddSingleton<ITransactionComparer, TransactionComparer>();
+        services.AddSingleton<VerificationEngine>();
+
+        // --- Sécurité : bearer token CBP fourni par Secret Server ---
+        services.AddHttpClient(SecretServerCbpTokenProvider.HttpClientName, (sp, client) =>
+        {
+            var options = sp.GetRequiredService<IOptions<SecretServerOptions>>().Value;
+            if (options.BaseUrl is not null)
+            {
+                client.BaseAddress = options.BaseUrl;
+            }
+        })
+        .AddStandardResilienceHandler(); // retry + timeout + circuit-breaker
+        services.AddSingleton<ICbpTokenProvider, SecretServerCbpTokenProvider>();
+        services.AddTransient<CbpBearerTokenHandler>();
+
+        // --- Source CBP : HttpClient typé + injection du bearer token ---
+        services.AddHttpClient<ICbpTransactionSource, CbpTransactionSource>((sp, client) =>
+        {
+            var options = sp.GetRequiredService<IOptions<CbpApiOptions>>().Value;
+            if (options.BaseUrl is not null)
+            {
+                client.BaseAddress = options.BaseUrl;
+            }
+
+            // Les timeouts sont pilotés par le pipeline de résilience (cf. ci-dessous).
+            client.Timeout = Timeout.InfiniteTimeSpan;
+        })
+        .AddHttpMessageHandler<CbpBearerTokenHandler>() // auth (en amont des retries)
+        .AddStandardResilienceHandler(resilience =>     // retry + timeout + circuit-breaker
+            resilience.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(
+                configuration.GetSection(CbpApiOptions.SectionName).GetValue("TimeoutSeconds", 100)));
+
+        // --- Accès données (Dapper) : fabriques de connexion ---
+        services.AddSingleton<IIntegriteDbConnectionFactory, IntegriteDbConnectionFactory>();
+        services.AddSingleton<IFxSentryDbConnectionFactory, FxSentryDbConnectionFactory>();
+
+        // --- Source FXSentry (lecture vue) + persistance des résultats (schéma cbp ; tables créées par les DBA) ---
+        services.AddScoped<IFxSentryTransactionSource, FxSentryTransactionSource>();
+        services.AddScoped<IVerificationStore, VerificationStore>();
+
+        // --- Notification ---
+        services.AddSingleton<IBackOfficeNotifier, BackOfficeNotifier>();
+
+        // --- Use-case ---
+        services.AddScoped<RunVerificationHandler>();
+
+        return services;
+    }
+}
+
+
+//End VerificationModule
+
+
+//VerificationContracts
+
+using IntegriteCBPFX.SharedKernel.Anomalies;
+using IntegriteCBPFX.SharedKernel.Transactions;
+using IntegriteCBPFX.SharedKernel.Verification;
+
+namespace IntegriteCBPFX.App.Features.Verification;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Contrats (ports) de la slice Verification.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// <summary>Plage de dates de trade traitée par un run (fromTradeDate / toTradeDate).</summary>
+/// <param name="FromTradeDate">Date de trade de début (incluse).</param>
+/// <param name="ToTradeDate">Date de trade de fin (incluse).</param>
+public sealed record VerificationDateRange(DateOnly FromTradeDate, DateOnly ToTradeDate);
+
+/// <summary>Source des transactions CBP (ResultSet A) — API REST CBP.</summary>
+public interface ICbpTransactionSource
+{
+    /// <exception cref="TransactionSourceUnavailableException">Source indisponible ou réponse en erreur (« API down »).</exception>
+    Task<IReadOnlyCollection<CbpTransaction>> GetTransactionsAsync(VerificationDateRange range, CancellationToken cancellationToken);
+}
+
+/// <summary>Source des transactions FXSentry (ResultSet B) — vue SQL Server cube.F_FRONTOFFICE.</summary>
+public interface IFxSentryTransactionSource
+{
+    /// <exception cref="TransactionSourceUnavailableException">Source indisponible (base/vue inaccessible).</exception>
+    Task<IReadOnlyCollection<FxSentryTransaction>> GetTransactionsAsync(VerificationDateRange range, CancellationToken cancellationToken);
+}
+
+/// <summary>Persistance des résultats (run + anomalies).</summary>
+public interface IVerificationStore
+{
+    Task SaveRunAsync(VerificationRun run, CancellationToken cancellationToken);
+
+    Task AddAnomaliesAsync(IReadOnlyCollection<AnomalyTransaction> anomalies, CancellationToken cancellationToken);
+}
+
+/// <summary>Notification du Back-Office si au moins une anomalie.</summary>
+public interface IBackOfficeNotifier
+{
+    Task NotifyAsync(VerificationRun run, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Levée par une source lorsqu'elle est indisponible (cas « ex. API down »).
+/// Interceptée par le handler pour clôturer le run en échec proprement.
+/// </summary>
+public sealed class TransactionSourceUnavailableException(TransactionSource source, string message, Exception? innerException = null)
+    : Exception(message, innerException)
+{
+    public TransactionSource FailedSource { get; } = source;
+}
+
+
+//End VerificationContracts
+
+//SecretServerTokenProvider
+using System.ComponentModel.DataAnnotations;
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace IntegriteCBPFX.App.Features.Verification;
+
+/// <summary>Options d'accès au coffre Secret Server (section « SecretServer »).</summary>
+public sealed class SecretServerOptions
+{
+    public const string SectionName = "SecretServer";
+
+    /// <summary>URL de base du Secret Server.</summary>
+    [Required]
+    public Uri? BaseUrl { get; set; }
+
+    /// <summary>Nom du secret contenant le bearer token CBP (recherché par nom).</summary>
+    [Required]
+    public string? SecretName { get; set; }
+
+    /// <summary>
+    /// Slug du champ du secret portant le token. Secret basé sur le template
+    /// « Generic API Key » → champ « API Key », slug <c>api-key</c> (à confirmer côté coffre).
+    /// </summary>
+    public string TokenFieldSlug { get; set; } = "api-key";
+}
+
+/// <summary>
+/// Fournit le bearer token d'appel à l'API CBP. L'origine (Secret Server) reste
+/// un détail d'infrastructure, masqué à l'adapter CBP.
+/// </summary>
+public interface ICbpTokenProvider
+{
+    Task<string> GetTokenAsync(CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Récupère le bearer token CBP depuis le Secret Server (API REST Delinea) et le
+/// conserve (cache) pour la durée du run, en **Authentification Windows Intégrée** :
+/// l'identité du compte qui exécute le batch (compte de service Control-M) authentifie
+/// les requêtes — aucun username/password. Endpoints sous <c>/winauthwebservices/api/v1</c>
+/// (l'envoi des credentials Windows est configuré sur le HttpClient « SecretServer »,
+/// cf. <c>VerificationModule</c> : <c>UseDefaultCredentials = true</c>).
+///   1. recherche du secret par NOM → résolution de son id ;
+///   2. lecture du champ <c>TokenFieldSlug</c>.
+/// </summary>
+public sealed class SecretServerCbpTokenProvider : ICbpTokenProvider
+{
+    public const string HttpClientName = "SecretServer";
+
+    // Mirroir de l'API sous authentification Windows intégrée.
+    private const string ApiBase = "/winauthwebservices/api/v1";
+
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly SecretServerOptions _options;
+    private readonly ILogger<SecretServerCbpTokenProvider> _logger;
+
+    // Lazy<Task<...>> : le token n'est récupéré qu'une fois, de façon thread-safe.
+    private readonly Lazy<Task<string>> _token;
+
+    public SecretServerCbpTokenProvider(
+        IHttpClientFactory httpClientFactory,
+        IOptions<SecretServerOptions> options,
+        ILogger<SecretServerCbpTokenProvider> logger)
+    {
+        _httpClientFactory = httpClientFactory;
+        _options = options.Value;
+        _logger = logger;
+        _token = new Lazy<Task<string>>(FetchTokenAsync);
+    }
+
+    public Task<string> GetTokenAsync(CancellationToken cancellationToken) => _token.Value;
+
+    private async Task<string> FetchTokenAsync()
+    {
+        _logger.LogInformation(
+            "Récupération du bearer token CBP (secret « {SecretName} », champ {Field}) depuis Secret Server (auth Windows intégrée).",
+            _options.SecretName, _options.TokenFieldSlug);
+
+        try
+        {
+            var client = _httpClientFactory.CreateClient(HttpClientName);
+            var secretId = await ResolveSecretIdAsync(client);
+            return await ReadSecretFieldAsync(client, secretId);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new InvalidOperationException("Échec d'accès au Secret Server.", ex);
+        }
+    }
+
+    /// <summary>Résout l'id numérique du secret à partir de son nom (recherche).</summary>
+    private async Task<int> ResolveSecretIdAsync(HttpClient client)
+    {
+        var name = _options.SecretName ?? throw new InvalidOperationException("SecretServer:SecretName non configuré.");
+
+        using var response = await client.GetAsync($"{ApiBase}/secrets?filter.searchField=name&filter.searchText={Uri.EscapeDataString(name)}");
+        response.EnsureSuccessStatusCode();
+
+        var result = await response.Content.ReadFromJsonAsync<SecretSearchResponse>();
+        var match = result?.Records?.FirstOrDefault(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase));
+        return match?.Id
+            ?? throw new InvalidOperationException($"Secret « {name} » introuvable dans Secret Server.");
+    }
+
+    private async Task<string> ReadSecretFieldAsync(HttpClient client, int secretId)
+    {
+        using var response = await client.GetAsync($"{ApiBase}/secrets/{secretId}/fields/{_options.TokenFieldSlug}");
+        response.EnsureSuccessStatusCode();
+
+        // L'endpoint renvoie la valeur du champ, généralement encodée en chaîne JSON.
+        var raw = (await response.Content.ReadAsStringAsync()).Trim();
+        if (raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
+        {
+            return JsonSerializer.Deserialize<string>(raw) ?? raw;
+        }
+
+        return raw;
+    }
+
+    private sealed class SecretSearchResponse
+    {
+        [JsonPropertyName("records")]
+        public List<SecretSummary>? Records { get; set; }
+    }
+
+    private sealed class SecretSummary
+    {
+        [JsonPropertyName("id")]
+        public int Id { get; set; }
+
+        [JsonPropertyName("name")]
+        public string? Name { get; set; }
+    }
+}
+
+//End SecretServerTokenProvider
+
+
+//RunVerification
+using System.Diagnostics;
+using System.Text.Json;
+using IntegriteCBPFX.SharedKernel.Abstractions;
+using IntegriteCBPFX.SharedKernel.Anomalies;
+using IntegriteCBPFX.SharedKernel.Transactions;
+using IntegriteCBPFX.SharedKernel.Verification;
+using Microsoft.Extensions.Logging;
+
+namespace IntegriteCBPFX.App.Features.Verification;
+
+/// <summary>Mode d'exécution déterminant la plage de dates de trade à traiter.</summary>
+public enum VerificationMode
+{
+    /// <summary>Veille : fromTradeDate = J-1, toTradeDate = jour courant.</summary>
+    Veille,
+
+    /// <summary>Journée courante : fromTradeDate = toTradeDate = jour courant.</summary>
+    JourneeCourante,
+}
+
+/// <summary>Commande : lancer la vérification d'intégrité pour un mode donné.</summary>
+public sealed record RunVerificationCommand(VerificationMode Mode);
+
+/// <summary>Résultat synthétique du run, utilisé par le host pour le code de sortie.</summary>
+public sealed record RunVerificationResult
+{
+    public required Guid RunId { get; init; }
+    public required VerificationStatus Status { get; init; }
+    public int CbpTransactionCount { get; init; }
+    public int FxTransactionCount { get; init; }
+    public int AnomalyCount { get; init; }
+    public string? FailureReason { get; init; }
+
+    public bool Succeeded => Status == VerificationStatus.Completed;
+    public bool HasAnomalies => AnomalyCount > 0;
+
+    public static RunVerificationResult FromRun(VerificationRun run) => new()
+    {
+        RunId = run.Id,
+        Status = run.Status,
+        CbpTransactionCount = run.CbpTransactionCount,
+        FxTransactionCount = run.FxTransactionCount,
+        AnomalyCount = run.AnomalyCount,
+        FailureReason = run.FailureReason,
+    };
+}
+
+/// <summary>
+/// Use-case central : extrait CBP + FXSentry pour la plage du mode, délègue le
+/// rapprochement au <see cref="VerificationEngine"/>, persiste, et notifie en cas d'anomalies.
+/// </summary>
+public sealed class RunVerificationHandler(
+    ICbpTransactionSource cbpSource,
+    IFxSentryTransactionSource fxSource,
+    VerificationEngine engine,
+    IVerificationStore store,
+    IBackOfficeNotifier notifier,
+    IClock clock,
+    ILogger<RunVerificationHandler> logger)
+{
+    public async Task<RunVerificationResult> HandleAsync(RunVerificationCommand command, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        var today = DateOnly.FromDateTime(clock.Current.Date);
+        var range = ResolveRange(command.Mode, today);
+
+        var run = VerificationRun.Start(Guid.NewGuid(), range.ToTradeDate, clock.Current);
+        var stopwatch = Stopwatch.StartNew();
+        using var scope = logger.BeginScope("Run {RunId} - {Mode} [{From}..{To}]", run.Id, command.Mode, range.FromTradeDate, range.ToTradeDate);
+        logger.LogInformation(
+            "Démarrage de la vérification — mode {Mode}, tradeDate {From}..{To} (run {RunId}).",
+            command.Mode, range.FromTradeDate, range.ToTradeDate, run.Id);
+
+        IReadOnlyCollection<CbpTransaction> cbpTransactions;
+        IReadOnlyCollection<FxSentryTransaction> fxTransactions;
+        try
+        {
+            cbpTransactions = await cbpSource.GetTransactionsAsync(range, cancellationToken);
+            logger.LogInformation("CBP : {Count} transaction(s) extraite(s).", cbpTransactions.Count);
+
+            fxTransactions = await fxSource.GetTransactionsAsync(range, cancellationToken);
+            logger.LogInformation("FXSentry : {Count} transaction(s) extraite(s).", fxTransactions.Count);
+        }
+        catch (TransactionSourceUnavailableException ex)
+        {
+            run.Fail(clock.Current, $"Source {ex.FailedSource} indisponible : {ex.Message}");
+            await store.SaveRunAsync(run, cancellationToken);
+            logger.LogError(ex, "Source {Source} indisponible — run {RunId} en échec après {Elapsed}.", ex.FailedSource, run.Id, stopwatch.Elapsed);
+            return RunVerificationResult.FromRun(run);
+        }
+
+        var anomalies = engine.Verify(cbpTransactions, fxTransactions, clock.Current);
+
+        logger.LogInformation(
+            "Rapprochement : {Total} anomalie(s) — Tx CBP absentes FX={CbpMissing}, Tx FX absentes CBP={FxMissing}, écarts champs={FieldDiffs}.",
+            anomalies.Count,
+            anomalies.Count(a => a.CodeErreur == AnomalyCode.CbpNotInFxSentry),
+            anomalies.Count(a => a.CodeErreur == AnomalyCode.FxSentryNotInCbp),
+            anomalies.Count(a => a.CodeErreur == AnomalyCode.FieldDifferences));
+
+        LogTopFieldsInError(anomalies);
+
+        await store.AddAnomaliesAsync(anomalies, cancellationToken);
+        run.Complete(clock.Current, cbpTransactions.Count, fxTransactions.Count, anomalies.Count);
+        await store.SaveRunAsync(run, cancellationToken);
+
+        if (anomalies.Count > 0)
+        {
+            await notifier.NotifyAsync(run, cancellationToken);
+            logger.LogInformation("Back-Office notifié ({Count} anomalie(s)).", anomalies.Count);
+        }
+
+        logger.LogInformation(
+            "Vérification terminée — statut {Status}, {AnomalyCount} anomalie(s), durée {Elapsed}.",
+            run.Status, anomalies.Count, stopwatch.Elapsed);
+
+        return RunVerificationResult.FromRun(run);
+    }
+
+    /// <summary>Journalise les 5 champs les plus fréquemment en écart (anomalies de code 3).</summary>
+    private void LogTopFieldsInError(IReadOnlyList<AnomalyTransaction> anomalies)
+    {
+        var topFields = anomalies
+            .Where(a => a.CodeErreur == AnomalyCode.FieldDifferences && a.ChampsErreurs is not null)
+            .SelectMany(a => JsonSerializer.Deserialize<string[]>(a.ChampsErreurs!) ?? [])
+            .GroupBy(field => field, StringComparer.Ordinal)
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => group.Key, StringComparer.Ordinal)
+            .Take(5)
+            .Select(group => $"{group.Key}={group.Count()}")
+            .ToArray();
+
+        if (topFields.Length > 0)
+        {
+            logger.LogInformation("Top champs en écart : {TopFields}.", string.Join(", ", topFields));
+        }
+    }
+
+    /// <summary>Résout la plage de dates de trade selon le mode.</summary>
+    public static VerificationDateRange ResolveRange(VerificationMode mode, DateOnly today) => mode switch
+    {
+        VerificationMode.Veille => new VerificationDateRange(today.AddDays(-1), today),
+        VerificationMode.JourneeCourante => new VerificationDateRange(today, today),
+        _ => throw new ArgumentOutOfRangeException(nameof(mode)),
+    };
+}
+
+//End RunVerification
+
+
+//FxSentryTransactionSource
+using Dapper;
+using IntegriteCBPFX.App.Common.Persistence;
+using IntegriteCBPFX.SharedKernel.Transactions;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace IntegriteCBPFX.App.Features.Verification;
+
+/// <summary>Options de la source FXSentry (section « FxSentry » de appsettings). La chaîne
+/// de connexion vit dans ConnectionStrings:FxSentry.</summary>
+public sealed class FxSentryOptions
+{
+    public const string SectionName = "FxSentry";
+
+    /// <summary>Schéma de la vue exposant les transactions FXSentry.</summary>
+    public string ViewSchema { get; set; } = "cube";
+
+    /// <summary>
+    /// Vue (maintenue par les DBA) appliquant jointures/filtres et résolvant C_CROSS — cf. db/README.md.
+    /// </summary>
+    public string ViewName { get; set; } = "F_FRONTOFFICE";
+}
+
+/// <summary>Ligne brute de la vue FXSentry (matérialisée par Dapper). Dates en INT yyyyMMdd.</summary>
+public sealed class FxSentryRow
+{
+    public string CustRef { get; set; } = string.Empty;
+    public string TradeNumber { get; set; } = string.Empty;
+    public int ActiveTradeStatus { get; set; }
+    public string CrossBaseCode { get; set; } = string.Empty;
+    public string CrossCurrencyCode { get; set; } = string.Empty;
+    public bool CrossFlipped { get; set; }
+    public string BuyCurrency { get; set; } = string.Empty;
+    public string SellCurrency { get; set; } = string.Empty;
+    public string SetCurrency { get; set; } = string.Empty;
+    public string? UserId { get; set; }
+    public string CustomerCode { get; set; } = string.Empty;
+    public int OriginalMaster { get; set; }
+    public string? Remark { get; set; }
+    public decimal FxRate { get; set; }
+    public decimal FxSpread { get; set; }
+    public int ValueDate { get; set; }
+    public int TradeDate { get; set; }
+    public decimal BuyAmount { get; set; }
+    public decimal SellAmount { get; set; }
+}
+
+/// <summary>
+/// Adapter FXSentry (ResultSet B) : lit la vue (Dapper) filtrée sur la plage de TRADE_DATE.
+/// Toute indisponibilité SQL est traduite en <see cref="TransactionSourceUnavailableException"/>.
+/// </summary>
+public sealed class FxSentryTransactionSource(
+    IFxSentryDbConnectionFactory connectionFactory,
+    IOptions<FxSentryOptions> options,
+    ILogger<FxSentryTransactionSource> logger) : IFxSentryTransactionSource
+{
+    private readonly FxSentryOptions _options = options.Value;
+
+    public async Task<IReadOnlyCollection<FxSentryTransaction>> GetTransactionsAsync(VerificationDateRange range, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(range);
+
+        var fromTradeDate = ToYyyymmdd(range.FromTradeDate);
+        var toTradeDate = ToYyyymmdd(range.ToTradeDate);
+
+        var sql = $"""
+            SELECT CUST_REF AS {nameof(FxSentryRow.CustRef)},
+                   TRADE_NUMBER AS {nameof(FxSentryRow.TradeNumber)},
+                   ACTIVE_TRADE_STATUS AS {nameof(FxSentryRow.ActiveTradeStatus)},
+                   CROSS_BASE_CODE AS {nameof(FxSentryRow.CrossBaseCode)},
+                   CROSS_CURRENCY_CODE AS {nameof(FxSentryRow.CrossCurrencyCode)},
+                   CROSS_FLIPPED AS {nameof(FxSentryRow.CrossFlipped)},
+                   BUY_CURRENCY AS {nameof(FxSentryRow.BuyCurrency)},
+                   SELL_CURRENCY AS {nameof(FxSentryRow.SellCurrency)},
+                   SET_CURRENCY AS {nameof(FxSentryRow.SetCurrency)},
+                   USER_ID AS {nameof(FxSentryRow.UserId)},
+                   CUSTOMER_CODE AS {nameof(FxSentryRow.CustomerCode)},
+                   ORIGINAL_MASTER AS {nameof(FxSentryRow.OriginalMaster)},
+                   REMARK AS {nameof(FxSentryRow.Remark)},
+                   FX_RATE AS {nameof(FxSentryRow.FxRate)},
+                   FX_SPREAD AS {nameof(FxSentryRow.FxSpread)},
+                   VALUE_DATE AS {nameof(FxSentryRow.ValueDate)},
+                   TRADE_DATE AS {nameof(FxSentryRow.TradeDate)},
+                   BUY_AMOUNT AS {nameof(FxSentryRow.BuyAmount)},
+                   SELL_AMOUNT AS {nameof(FxSentryRow.SellAmount)}
+            FROM {_options.ViewSchema}.{_options.ViewName}
+            WHERE TRADE_DATE BETWEEN @FromTradeDate AND @ToTradeDate;
+            """;
+
+        try
+        {
+            logger.LogDebug("Lecture de la vue FXSentry [{From}..{To}].", fromTradeDate, toTradeDate);
+
+            using var connection = connectionFactory.Create();
+            var rows = await connection.QueryAsync<FxSentryRow>(
+                new CommandDefinition(sql, new { FromTradeDate = fromTradeDate, ToTradeDate = toTradeDate }, cancellationToken: cancellationToken));
+
+            return rows.Select(Map).ToArray();
+        }
+        catch (SqlException ex)
+        {
+            throw new TransactionSourceUnavailableException(TransactionSource.FxSentry, "Base FXSentry inaccessible.", ex);
+        }
+    }
+
+    /// <summary>Projette une ligne de vue vers le modèle de domaine (conversion des dates INT).</summary>
+    public static FxSentryTransaction Map(FxSentryRow row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        return new FxSentryTransaction
+        {
+            CustRef = row.CustRef,
+            TradeNumber = row.TradeNumber,
+            ActiveTradeStatus = row.ActiveTradeStatus,
+            CrossBaseCode = row.CrossBaseCode,
+            CrossCurrencyCode = row.CrossCurrencyCode,
+            CrossFlipped = row.CrossFlipped,
+            BuyCurrency = row.BuyCurrency,
+            SellCurrency = row.SellCurrency,
+            SetCurrency = row.SetCurrency,
+            UserId = row.UserId,
+            CustomerCode = row.CustomerCode,
+            OriginalMaster = row.OriginalMaster,
+            Remark = row.Remark,
+            FxRate = row.FxRate,
+            FxSpread = row.FxSpread,
+            ValueDate = FromYyyymmdd(row.ValueDate),
+            TradeDate = FromYyyymmdd(row.TradeDate),
+            BuyAmount = row.BuyAmount,
+            SellAmount = row.SellAmount,
+        };
+    }
+
+    private static int ToYyyymmdd(DateOnly date) => (date.Year * 10000) + (date.Month * 100) + date.Day;
+
+    public static DateOnly FromYyyymmdd(int value) => new(value / 10000, value / 100 % 100, value % 100);
+}
+
+//End FxSentryTransactionSource
