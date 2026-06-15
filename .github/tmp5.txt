@@ -358,3 +358,56 @@ public sealed class FxSentryDbConnectionFactory(IConfiguration configuration) : 
 }
 
 //End DbConnectionFactories
+
+
+
+
+//settings
+{
+  "NLog": {
+    "throwConfigExceptions": true,
+    "internalLogLevel": "Off",
+    "targets": {
+      "console": {
+        "type": "Console",
+        "layout": "[${date:format=HH\\:mm\\:ss} ${level:format=TriLetter:uppercase=true}] [${mdlc:item=RunId}] ${message}${onexception:${newline}${exception:format=ToString}}"
+      },
+      "file": {
+        "type": "File",
+        "fileName": "${basedir}/logs/integrite-${shortdate}.log",
+        "maxArchiveDays": 14,
+        "keepFileOpen": true,
+        "layout": "${longdate} [${level:format=TriLetter:uppercase=true}] [${mdlc:item=RunId}] ${message}${onexception:${newline}${exception:format=ToString}}"
+      }
+    },
+    "rules": [
+      { "logger": "Microsoft.*", "maxLevel": "Info", "final": true },
+      { "logger": "System.Net.Http.*", "maxLevel": "Info", "final": true },
+      { "logger": "*", "minLevel": "Info", "writeTo": "console,file" }
+    ]
+  },
+  "ConnectionStrings": {
+    "//": "Integrite = base de persistance des anomalies (schéma cbp, tables créées par les DBA). FxSentry = base lue (vue).",
+    "Integrite": "Server=localhost;Database=IntegriteCBPFX;Trusted_Connection=True;TrustServerCertificate=True",
+    "FxSentry": "Server=localhost;Database=FxSentry;Trusted_Connection=True;TrustServerCertificate=True"
+  },
+  "Cbp": {
+    "//": "Valeurs PLACEHOLDER pour faire tourner le squelette. À renseigner par environnement.",
+    "BaseUrl": "http://localhost:5080",
+    "TransactionsPath": "/api/transactions",
+    "Status": [ "ALL" ],
+    "TimeoutSeconds": 100
+  },
+  "SecretServer": {
+    "//": "Coffre fournissant le bearer token d'appel à CBP. Authentification Windows intégrée (identité du compte qui exécute le batch) — aucun credential ici.",
+    "BaseUrl": "https://secretserver.example.local",
+    "SecretName": "CBP-API-BearerToken",
+    "TokenFieldSlug": "api-key"
+  },
+  "FxSentry": {
+    "ViewSchema": "cube",
+    "ViewName": "F_FRONTOFFICE"
+  }
+}
+
+//end settings
