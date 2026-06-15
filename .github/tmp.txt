@@ -1,0 +1,658 @@
+//program
+
+using IntegriteCBPFx.App;
+using IntegriteCBPFx.App.Features.Verification;
+using IntegriteCBPFx.SharedKernel.Abstractions;
+using IntegriteCBPFx.SharedKernel.Time;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using NLog;
+using NLog.Extensions.Logging;
+
+// Charge la config NLog tôt : capte aussi les erreurs survenant AVANT le host.
+var logger = LogManager.Setup().LoadConfigurationFromFile("nlog.config").GetCurrentClassLogger();
+
+try
+{
+    var builder = Host.CreateApplicationBuilder(args);
+
+    // Journalisation : NLog comme unique fournisseur (config = nlog.config).
+    builder.Logging.ClearProviders();
+    builder.Logging.AddNLog();
+
+    // Services transverses + slice(s).
+    builder.Services.AddSingleton<IClock, SystemClock>();
+    builder.Services.AddVerificationFeature(builder.Configuration);
+    // NB : le DbContext de persistance n'est pas encore enregistré (adapter Store
+    // = stub). Le dev Persistance ajoutera ici AddDbContext + EfVerificationStore.
+
+    using var host = builder.Build();
+
+    DateOnly businessDate;
+    try
+    {
+        businessDate = VerificationArgs.ResolveBusinessDate(args, host.Services.GetRequiredService<IClock>());
+    }
+    catch (FormatException ex)
+    {
+        logger.Error(ex, "Arguments de ligne de commande invalides.");
+        return ExitCodes.InvalidArguments;
+    }
+
+    // Annulation propre sur Ctrl+C / arrêt Control-M.
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, eventArgs) =>
+    {
+        eventArgs.Cancel = true;
+        cts.Cancel();
+    };
+
+    using var scope = host.Services.CreateScope();
+    var handler = scope.ServiceProvider.GetRequiredService<RunVerificationHandler>();
+
+    var result = await handler.HandleAsync(new RunVerificationCommand(businessDate), cts.Token);
+
+    return ExitCodes.FromResult(result);
+}
+catch (Exception ex)
+{
+    logger.Fatal(ex, "Échec inattendu de la vérification.");
+    return ExitCodes.UnexpectedError;
+}
+finally
+{
+    // Vide les buffers des targets NLog (important pour un batch court).
+    LogManager.Shutdown();
+}
+
+
+//end program
+
+//VerificationArgs
+using System.Globalization;
+using IntegriteCBPFx.SharedKernel.Abstractions;
+
+namespace IntegriteCBPFx.App;
+
+/// <summary>
+/// Analyse des arguments de ligne de commande passés par Control-M.
+/// </summary>
+/// <remarks>
+/// Usage :
+///   IntegriteCBPFx                       -> date métier = J-1 (jour ouvré précédent simplifié)
+///   IntegriteCBPFx 2026-06-11            -> date métier explicite (ISO)
+///   IntegriteCBPFx --date 2026-06-11     -> idem
+///   IntegriteCBPFx --date=2026-06-11     -> idem
+/// </remarks>
+public static class VerificationArgs
+{
+    /// <summary>Résout la date métier à traiter à partir des arguments (défaut : J-1).</summary>
+    /// <exception cref="FormatException">Si une date est fournie mais non parseable (format ISO attendu).</exception>
+    public static DateOnly ResolveBusinessDate(string[] args, IClock clock)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+        ArgumentNullException.ThrowIfNull(clock);
+
+        var raw = ExtractDateToken(args);
+        if (raw is null)
+        {
+            // Défaut : veille du jour courant. ⚠️ Calendrier des jours ouvrés à
+            // affiner avec le métier (jours fériés, week-ends) si nécessaire.
+            return DateOnly.FromDateTime(clock.Current.Date).AddDays(-1);
+        }
+
+        if (!DateOnly.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var businessDate))
+        {
+            throw new FormatException($"Date métier invalide : « {raw} ». Format attendu : yyyy-MM-dd.");
+        }
+
+        return businessDate;
+    }
+
+    private static string? ExtractDateToken(string[] args)
+    {
+        for (var i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (arg.StartsWith("--date=", StringComparison.OrdinalIgnoreCase))
+            {
+                return arg["--date=".Length..];
+            }
+
+            if (arg.Equals("--date", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+            {
+                return args[i + 1];
+            }
+
+            if (!arg.StartsWith('-'))
+            {
+                return arg; // argument positionnel
+            }
+        }
+
+        return null;
+    }
+}
+
+//end VerificationArgs
+
+
+//exit codes
+using IntegriteCBPFx.App.Features.Verification;
+
+namespace IntegriteCBPFx.App;
+
+/// <summary>
+/// Codes de sortie du processus, interprétés par Control-M.
+/// Convention : 0 = OK (le job a tourné), &gt; 0 = échec technique du job.
+/// </summary>
+/// <remarks>
+/// La présence d'anomalies N'EST PAS un échec : le run a réussi, les anomalies
+/// sont des données métier (le Back-Office est alerté via la notification).
+/// Si Control-M doit brancher spécifiquement sur « anomalies détectées », ajouter
+/// ici un code dédié (p. ex. 10) et l'utiliser dans <see cref="FromResult"/>.
+/// </remarks>
+public static class ExitCodes
+{
+    /// <summary>Run terminé avec succès (avec ou sans anomalies).</summary>
+    public const int Success = 0;
+
+    /// <summary>Erreur inattendue (exception non gérée).</summary>
+    public const int UnexpectedError = 1;
+
+    /// <summary>Run en échec fonctionnel (p. ex. source indisponible / « API down »).</summary>
+    public const int VerificationFailed = 2;
+
+    /// <summary>Arguments de ligne de commande invalides.</summary>
+    public const int InvalidArguments = 3;
+
+    public static int FromResult(RunVerificationResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        return result.Succeeded ? Success : VerificationFailed;
+    }
+}
+
+//end exit codes
+
+//settings
+{
+  "ConnectionStrings": {
+    "//": "Base de persistance des anomalies (tables créées par les DBA).",
+    "Integrite": "Server=localhost;Database=IntegriteCBPFx;Trusted_Connection=True;TrustServerCertificate=True"
+  },
+  "Cbp": {
+    "//": "Valeurs PLACEHOLDER pour faire tourner le squelette. À renseigner par environnement.",
+    "BaseUrl": "http://localhost:5080",
+    "TransactionsPath": "/api/transactions",
+    "Status": [ "ALL" ],
+    "TimeoutSeconds": 100
+  },
+  "FxSentry": {
+    "ConnectionString": "Server=localhost;Database=FxSentry;Trusted_Connection=True;TrustServerCertificate=True",
+    "ViewName": "dbo.vw_FxSentryTransactions"
+  }
+}
+
+//end settings
+
+//verification module
+using IntegriteCBPFx.SharedKernel.Comparison;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+
+namespace IntegriteCBPFx.App.Features.Verification;
+
+/// <summary>
+/// Câblage DI de la slice Verification. Point d'entrée unique : le host appelle
+/// <c>AddVerificationFeature(configuration)</c> et toute la slice est enregistrée.
+/// </summary>
+public static class VerificationModule
+{
+    public static IServiceCollection AddVerificationFeature(this IServiceCollection services, IConfiguration configuration)
+    {
+        // --- Options validées ---
+        services.AddOptions<CbpApiOptions>()
+            .Bind(configuration.GetSection(CbpApiOptions.SectionName))
+            .ValidateDataAnnotations();
+
+        services.AddOptions<FxSentryOptions>()
+            .Bind(configuration.GetSection(FxSentryOptions.SectionName))
+            .ValidateDataAnnotations();
+
+        // --- Règles de domaine (SharedKernel) — implémentations par défaut du MVP ---
+        services.AddSingleton<ITransactionComparer, CriticalFieldComparer>();
+        services.AddSingleton<IJustificationPolicy, NoJustificationPolicy>();
+
+        // --- Adapters de la slice (stubs walking-skeleton à remplacer) ---
+        // CBP : HttpClient typé, configuré depuis les options.
+        services.AddHttpClient<ICbpTransactionSource, CbpTransactionSource>((sp, client) =>
+        {
+            var options = sp.GetRequiredService<IOptions<CbpApiOptions>>().Value;
+            if (options.BaseUrl is not null)
+            {
+                client.BaseAddress = options.BaseUrl;
+            }
+
+            client.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
+            if (!string.IsNullOrEmpty(options.ApiKey))
+            {
+                client.DefaultRequestHeaders.Add("X-Api-Key", options.ApiKey);
+            }
+        });
+        // TODO(dev CBP) : ajouter la résilience -> .AddStandardResilienceHandler();
+
+        services.AddScoped<IFxSentryTransactionSource, FxSentryTransactionSource>();
+        services.AddScoped<IVerificationStore, VerificationStore>();
+        services.AddSingleton<IBackOfficeNotifier, BackOfficeNotifier>();
+
+        // --- Use-case ---
+        services.AddScoped<RunVerificationHandler>();
+
+        return services;
+    }
+}
+
+//end verification module
+
+
+// RunVerificationResult
+using IntegriteCBPFx.SharedKernel.Abstractions;
+using IntegriteCBPFx.SharedKernel.Anomalies;
+using IntegriteCBPFx.SharedKernel.Comparison;
+using IntegriteCBPFx.SharedKernel.Transactions;
+using IntegriteCBPFx.SharedKernel.Verification;
+using Microsoft.Extensions.Logging;
+
+namespace IntegriteCBPFx.App.Features.Verification;
+
+/// <summary>Commande : lancer la vérification d'intégrité pour une date métier.</summary>
+public sealed record RunVerificationCommand(DateOnly BusinessDate);
+
+/// <summary>Résultat synthétique du run, utilisé par le host pour le code de sortie.</summary>
+public sealed record RunVerificationResult
+{
+    public required Guid RunId { get; init; }
+    public required VerificationStatus Status { get; init; }
+    public int CbpTransactionCount { get; init; }
+    public int FxTransactionCount { get; init; }
+    public int AnomalyCount { get; init; }
+    public string? FailureReason { get; init; }
+
+    public bool Succeeded => Status == VerificationStatus.Completed;
+    public bool HasAnomalies => AnomalyCount > 0;
+
+    public static RunVerificationResult FromRun(VerificationRun run) => new()
+    {
+        RunId = run.Id,
+        Status = run.Status,
+        CbpTransactionCount = run.CbpTransactionCount,
+        FxTransactionCount = run.FxTransactionCount,
+        AnomalyCount = run.AnomalyCount,
+        FailureReason = run.FailureReason,
+    };
+}
+
+/// <summary>
+/// Use-case central de la slice : transcrit le diagramme de processus MVP.
+///   1. Extraire CBP (A) puis FXSentry (B) — échec si une source est indisponible.
+///   2. Pour chaque Tx de A : absente de B => anomalie ; sinon comparer les champs
+///      critiques ; écart non justifiable => anomalie.
+///   3. Pour chaque Tx de B non traitée => anomalie.
+///   4. Persister run + anomalies.
+///   5. Au moins une anomalie => notifier le Back-Office.
+///
+///  La logique d'ORCHESTRATION (le flux ci-dessous) est volontairement complète :
+/// c'est le squelette stable autour duquel les devs branchent leurs adapters.
+/// Les VRAIES données viennent des adapters (CBP/FX/Store/Notifier), encore stubs.
+/// </summary>
+public sealed class RunVerificationHandler(
+    ICbpTransactionSource cbpSource,
+    IFxSentryTransactionSource fxSource,
+    ITransactionComparer comparer,
+    IJustificationPolicy justificationPolicy,
+    IVerificationStore store,
+    IBackOfficeNotifier notifier,
+    IClock clock,
+    ILogger<RunVerificationHandler> logger)
+{
+    public async Task<RunVerificationResult> HandleAsync(RunVerificationCommand command, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        var run = VerificationRun.Start(Guid.NewGuid(), command.BusinessDate, clock.Current);
+        using var scope = logger.BeginScope("Run {RunId} - {BusinessDate}", run.Id, command.BusinessDate);
+        logger.LogInformation("Démarrage de la vérification.");
+
+        // --- Étape 1 : extraction des deux sources (gestion « API down ») ---
+        IReadOnlyCollection<AppTransaction> cbpTransactions;
+        IReadOnlyCollection<AppTransaction> fxTransactions;
+        try
+        {
+            cbpTransactions = await ExtractCbpTransactionsAsync(command.BusinessDate, cancellationToken);
+            fxTransactions = await ExtractFxSentryTransactionsAsync(command.BusinessDate, cancellationToken);
+        }
+        catch (TransactionSourceUnavailableException ex)
+        {
+            return await FailRunAsync(run, ex, cancellationToken);
+        }
+
+        logger.LogInformation(
+            "Extraction OK : {CbpCount} transactions CBP, {FxCount} transactions FXSentry.",
+            cbpTransactions.Count, fxTransactions.Count);
+
+        // --- Étapes 2 & 3 : vérification ---
+        var anomalies = Verify(run.Id, cbpTransactions, fxTransactions);
+
+        // --- Étape 4 : persistance ---
+        await store.AddAnomaliesAsync(anomalies, cancellationToken);
+        run.Complete(clock.Current, cbpTransactions.Count, fxTransactions.Count, anomalies.Count);
+        await store.SaveRunAsync(run, cancellationToken);
+
+        logger.LogInformation("Vérification terminée : {AnomalyCount} anomalie(s).", anomalies.Count);
+
+        // --- Étape 5 : notification si au moins une anomalie ---
+        if (anomalies.Count > 0)
+        {
+            await notifier.NotifyAsync(run, cancellationToken);
+        }
+
+        return RunVerificationResult.FromRun(run);
+    }
+
+    /// <summary>Extraction des transactions CBP (ResultSet A).</summary>
+    private async Task<IReadOnlyCollection<AppTransaction>> ExtractCbpTransactionsAsync(DateOnly businessDate, CancellationToken cancellationToken)
+    {
+        var transactions = await cbpSource.GetTransactionsAsync(businessDate, cancellationToken);
+        logger.LogDebug("CBP : {Count} transaction(s) extraite(s).", transactions.Count);
+        return transactions;
+    }
+
+    /// <summary>Extraction des transactions FXSentry (ResultSet B).</summary>
+    private async Task<IReadOnlyCollection<AppTransaction>> ExtractFxSentryTransactionsAsync(DateOnly businessDate, CancellationToken cancellationToken)
+    {
+        var transactions = await fxSource.GetTransactionsAsync(businessDate, cancellationToken);
+        logger.LogDebug("FXSentry : {Count} transaction(s) extraite(s).", transactions.Count);
+        return transactions;
+    }
+
+    /// <summary>Clôture le run en échec (source indisponible) et le persiste.</summary>
+    private async Task<RunVerificationResult> FailRunAsync(VerificationRun run, TransactionSourceUnavailableException ex, CancellationToken cancellationToken)
+    {
+        logger.LogError(ex, "Source {Source} indisponible. Run interrompu.", ex.FailedSource);
+        run.Fail(clock.Current, $"Source {ex.FailedSource} indisponible : {ex.Message}");
+        await store.SaveRunAsync(run, cancellationToken);
+        return RunVerificationResult.FromRun(run);
+    }
+
+    private List<Anomaly> Verify(
+        Guid runId,
+        IReadOnlyCollection<AppTransaction> cbpTransactions,
+        IReadOnlyCollection<AppTransaction> fxTransactions)
+    {
+        var now = clock.Current;
+        var anomalies = new List<Anomaly>();
+
+        // Index des transactions FX par clé métier pour une vérification O(n).
+        // NB : clé supposée unique côté FX ; les doublons sont signalés
+        // (règle de gestion à confirmer avec le métier).
+        var fxByKey = new Dictionary<string, AppTransaction>(StringComparer.Ordinal);
+        foreach (var fx in fxTransactions)
+        {
+            if (!fxByKey.TryAdd(fx.TransactionId, fx))
+            {
+                logger.LogWarning("Clé FXSentry en doublon ignorée : {TransactionId}.", fx.TransactionId);
+            }
+        }
+
+        var matchedFxKeys = new HashSet<string>(StringComparer.Ordinal);
+
+        // Pour chaque transaction de A (CBP).
+        foreach (var cbp in cbpTransactions)
+        {
+            if (!fxByKey.TryGetValue(cbp.TransactionId, out var fx))
+            {
+                anomalies.Add(Anomaly.CbpNotPresentInFx(runId, cbp, now));
+                continue;
+            }
+
+            matchedFxKeys.Add(cbp.TransactionId);
+
+            var comparison = comparer.Compare(cbp, fx);
+            if (comparison.HasDifferences && !justificationPolicy.IsJustifiable(cbp, fx, comparison.Differences))
+            {
+                anomalies.Add(Anomaly.CbpFxDifferent(runId, cbp, fx, comparison.Differences, now));
+            }
+        }
+
+        // Pour chaque transaction de B non encore traitée.
+        foreach (var fx in fxTransactions)
+        {
+            if (!matchedFxKeys.Contains(fx.TransactionId))
+            {
+                anomalies.Add(Anomaly.FxNotPresentInCbp(runId, fx, now));
+            }
+        }
+
+        return anomalies;
+    }
+}
+
+// end RunVerificationResult
+
+//RunVerificationHandlerTests
+using IntegriteCBPFx.App.Features.Verification;
+using IntegriteCBPFx.SharedKernel.Anomalies;
+using IntegriteCBPFx.SharedKernel.Comparison;
+using IntegriteCBPFx.SharedKernel.Verification;
+using IntegriteCBPFx.SharedKernel.Transactions;
+using IntegriteCBPFx.Tests.TestSupport;
+using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
+using Xunit;
+
+namespace IntegriteCBPFx.Tests.Features.Verification;
+
+public sealed class RunVerificationHandlerTests
+{
+    private readonly ICbpTransactionSource _cbpSource = Substitute.For<ICbpTransactionSource>();
+    private readonly IFxSentryTransactionSource _fxSource = Substitute.For<IFxSentryTransactionSource>();
+    private readonly IVerificationStore _store = Substitute.For<IVerificationStore>();
+    private readonly IBackOfficeNotifier _notifier = Substitute.For<IBackOfficeNotifier>();
+
+    private RunVerificationHandler CreateHandler() => new(
+        _cbpSource,
+        _fxSource,
+        new CriticalFieldComparer(),
+        new NoJustificationPolicy(),
+        _store,
+        _notifier,
+        new FixedClock(new DateTimeOffset(2026, 6, 12, 8, 0, 0, TimeSpan.Zero)),
+        NullLogger<RunVerificationHandler>.Instance);
+
+    private void GivenSources(IReadOnlyCollection<AppTransaction> cbp, IReadOnlyCollection<AppTransaction> fx)
+    {
+        _cbpSource.GetTransactionsAsync(Arg.Any<DateOnly>(), Arg.Any<CancellationToken>()).Returns(cbp);
+        _fxSource.GetTransactionsAsync(Arg.Any<DateOnly>(), Arg.Any<CancellationToken>()).Returns(fx);
+    }
+
+    [Fact]
+    public async Task When_CbpTransaction_Missing_In_Fx_Then_AnomalyCbpNotPresentInFx()
+    {
+        GivenSources([TransactionBuilder.Cbp("T1")], []);
+
+        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(TransactionBuilder.DefaultDate), CancellationToken.None);
+
+        Assert.Equal(VerificationStatus.Completed, result.Status);
+        Assert.Equal(1, result.AnomalyCount);
+        await _store.Received(1).AddAnomaliesAsync(
+            Arg.Is<IReadOnlyCollection<Anomaly>>(a => a.Count == 1 && a.First().Reason == AnomalyReason.CbpNotPresentInFx),
+            Arg.Any<CancellationToken>());
+        await _notifier.Received(1).NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task When_FxTransaction_Missing_In_Cbp_Then_AnomalyFxNotPresentInCbp()
+    {
+        GivenSources([], [TransactionBuilder.Fx("T1")]);
+
+        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(TransactionBuilder.DefaultDate), CancellationToken.None);
+
+        Assert.Equal(1, result.AnomalyCount);
+        await _store.Received(1).AddAnomaliesAsync(
+            Arg.Is<IReadOnlyCollection<Anomaly>>(a => a.Single().Reason == AnomalyReason.FxNotPresentInCbp),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task When_CriticalField_Differs_Then_AnomalyCbpFxDifferent()
+    {
+        GivenSources([TransactionBuilder.Cbp("T1", amount: 100m)], [TransactionBuilder.Fx("T1", amount: 999m)]);
+
+        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(TransactionBuilder.DefaultDate), CancellationToken.None);
+
+        Assert.Equal(1, result.AnomalyCount);
+        await _store.Received(1).AddAnomaliesAsync(
+            Arg.Is<IReadOnlyCollection<Anomaly>>(a => a.Single().Reason == AnomalyReason.CbpFxDifferent),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task When_Transactions_Match_Then_NoAnomaly_And_NoNotification()
+    {
+        GivenSources([TransactionBuilder.Cbp("T1")], [TransactionBuilder.Fx("T1")]);
+
+        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(TransactionBuilder.DefaultDate), CancellationToken.None);
+
+        Assert.Equal(0, result.AnomalyCount);
+        await _notifier.DidNotReceive().NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task When_Source_Unavailable_Then_RunFails_And_NothingPersisted()
+    {
+        _cbpSource.GetTransactionsAsync(Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
+            .Returns<IReadOnlyCollection<AppTransaction>>(_ => throw new TransactionSourceUnavailableException(TransactionSource.Cbp, "API down"));
+
+        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(TransactionBuilder.DefaultDate), CancellationToken.None);
+
+        Assert.Equal(VerificationStatus.Failed, result.Status);
+        await _store.DidNotReceive().AddAnomaliesAsync(Arg.Any<IReadOnlyCollection<Anomaly>>(), Arg.Any<CancellationToken>());
+        await _notifier.DidNotReceive().NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
+        await _store.Received(1).SaveRunAsync(Arg.Is<VerificationRun>(r => r.Status == VerificationStatus.Failed), Arg.Any<CancellationToken>());
+    }
+}
+
+//end RunVerificationHandlerTests
+
+
+//CriticalFieldComparerTests
+using IntegriteCBPFx.SharedKernel.Comparison;
+using IntegriteCBPFx.Tests.TestSupport;
+using Xunit;
+
+namespace IntegriteCBPFx.Tests.SharedKernel;
+
+public sealed class CriticalFieldComparerTests
+{
+    private readonly CriticalFieldComparer _comparer = new();
+
+    [Fact]
+    public void Compare_WhenAllCriticalFieldsMatch_ReturnsNoDifference()
+    {
+        var cbp = TransactionBuilder.Cbp("T1");
+        var fx = TransactionBuilder.Fx("T1");
+
+        var result = _comparer.Compare(cbp, fx);
+
+        Assert.False(result.HasDifferences);
+    }
+
+    [Fact]
+    public void Compare_WhenAmountDiffers_ReportsAmountDifference()
+    {
+        var cbp = TransactionBuilder.Cbp("T1", amount: 100m);
+        var fx = TransactionBuilder.Fx("T1", amount: 101m);
+
+        var result = _comparer.Compare(cbp, fx);
+
+        Assert.True(result.HasDifferences);
+        Assert.Contains(result.Differences, d => d.FieldName == "Amount");
+    }
+
+    [Fact]
+    public void Compare_WhenCurrencyDiffers_ReportsCurrencyDifference()
+    {
+        var cbp = TransactionBuilder.Cbp("T1", currency: "EUR");
+        var fx = TransactionBuilder.Fx("T1", currency: "USD");
+
+        var result = _comparer.Compare(cbp, fx);
+
+        Assert.Contains(result.Differences, d => d.FieldName == "Currency" && d.CbpValue == "EUR" && d.FxValue == "USD");
+    }
+}
+
+//end CriticalFieldComparerTests
+
+// FixedClock
+using IntegriteCBPFx.SharedKernel.Abstractions;
+
+namespace IntegriteCBPFx.Tests.TestSupport;
+
+/// <summary>Horloge figée pour des tests déterministes.</summary>
+public sealed class FixedClock(DateTimeOffset now) : IClock
+{
+    public DateTimeOffset Current { get; } = now;
+}
+
+//end FixedClock
+
+// TransactionBuilder
+using IntegriteCBPFx.SharedKernel.Transactions;
+
+namespace IntegriteCBPFx.Tests.TestSupport;
+
+/// <summary>Petit builder pour fabriquer des transactions de test lisibles.</summary>
+public static class TransactionBuilder
+{
+    public static readonly DateOnly DefaultDate = new(2026, 6, 11);
+
+    public static AppTransaction Cbp(
+        string id,
+        decimal amount = 100m,
+        string currency = "EUR",
+        string? direction = "BUY",
+        string? counterpartyId = "CP1",
+        DateOnly? valueDate = null) => new()
+        {
+            TransactionId = id,
+            Source = TransactionSource.Cbp,
+            ValueDate = valueDate ?? DefaultDate,
+            Currency = currency,
+            Amount = amount,
+            Direction = direction,
+            CounterpartyId = counterpartyId,
+        };
+
+    public static AppTransaction Fx(
+        string id,
+        decimal amount = 100m,
+        string currency = "EUR",
+        string? direction = "BUY",
+        string? counterpartyId = "CP1",
+        DateOnly? valueDate = null) => new()
+        {
+            TransactionId = id,
+            Source = TransactionSource.FxSentry,
+            ValueDate = valueDate ?? DefaultDate,
+            Currency = currency,
+            Amount = amount,
+            Direction = direction,
+            CounterpartyId = counterpartyId,
+        };
+}
+
+// end TransactionBuilder
+
