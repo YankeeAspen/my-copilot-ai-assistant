@@ -1,0 +1,243 @@
+//anomaly
+public sealed class Anomaly
+{
+    // ctor privé requis par EF Core pour la matérialisation.
+    private Anomaly()
+    {
+        TransactionId = string.Empty;
+        Currency = string.Empty;
+    }
+
+    public Guid Id { get; private set; }
+    public Guid RunId { get; private set; }
+    public string TransactionId { get; private set; }
+    public AnomalyReason Reason { get; private set; }
+    public TransactionSource Source { get; private set; }
+    public DateOnly ValueDate { get; private set; }
+    public string Currency { get; private set; }
+    public decimal Amount { get; private set; }
+
+    /// <summary>Détail des écarts (JSON) pour le motif <see cref="AnomalyReason.CbpFxDifferent"/>; sinon null.</summary>
+    public string? DifferencesJson { get; private set; }
+
+    public DateTimeOffset DetectedAtUtc { get; private set; }
+
+    public static Anomaly CbpNotPresentInFx(Guid runId, AppTransaction cbp, DateTimeOffset detectedAtUtc)
+    {
+        ArgumentNullException.ThrowIfNull(cbp);
+        return new Anomaly
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            TransactionId = cbp.TransactionId,
+            Reason = AnomalyReason.CbpNotPresentInFx,
+            Source = TransactionSource.Cbp,
+            ValueDate = cbp.ValueDate,
+            Currency = cbp.Currency,
+            Amount = cbp.Amount,
+            DetectedAtUtc = detectedAtUtc,
+        };
+    }
+
+    public static Anomaly CbpFxDifferent(Guid runId, AppTransaction cbp, AppTransaction fxSentry, IReadOnlyList<FieldDifference> differences, DateTimeOffset detectedAtUtc)
+    {
+        ArgumentNullException.ThrowIfNull(cbp);
+        ArgumentNullException.ThrowIfNull(fxSentry);
+        ArgumentNullException.ThrowIfNull(differences);
+        return new Anomaly
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            TransactionId = cbp.TransactionId,
+            Reason = AnomalyReason.CbpFxDifferent,
+            Source = TransactionSource.Cbp,
+            ValueDate = cbp.ValueDate,
+            Currency = cbp.Currency,
+            Amount = cbp.Amount,
+            DifferencesJson = JsonSerializer.Serialize(differences),
+            DetectedAtUtc = detectedAtUtc,
+        };
+    }
+
+    public static Anomaly FxNotPresentInCbp(Guid runId, AppTransaction fxSentry, DateTimeOffset detectedAtUtc)
+    {
+        ArgumentNullException.ThrowIfNull(fxSentry);
+        return new Anomaly
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            TransactionId = fxSentry.TransactionId,
+            Reason = AnomalyReason.FxNotPresentInCbp,
+            Source = TransactionSource.FxSentry,
+            ValueDate = fxSentry.ValueDate,
+            Currency = fxSentry.Currency,
+            Amount = fxSentry.Amount,
+            DetectedAtUtc = detectedAtUtc,
+        };
+    }
+}
+
+// end anomaly
+
+
+// FxSentryTransactionSource
+using System.ComponentModel.DataAnnotations;
+using IntegriteCBPFx.SharedKernel.Transactions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace IntegriteCBPFx.App.Features.Verification;
+
+/// <summary>Options de la source FXSentry (section « FxSentry » de appsettings).</summary>
+public sealed class FxSentryOptions
+{
+    public const string SectionName = "FxSentry";
+
+    /// <summary>Chaîne de connexion à la base SQL Server FXSentry (lecture seule).</summary>
+    [Required]
+    public string? ConnectionString { get; set; }
+
+    /// <summary>Vue (schéma.objet) exposant les transactions FXSentry, créée par les DBA.</summary>
+    public string ViewName { get; set; } = "dbo.vw_FxSentryTransactions";
+}
+
+/// <summary>
+/// Adapter FXSentry (ResultSet B), lecture de la vue SQL Server.
+///
+/// 🚧 STUB walking-skeleton : renvoie une liste vide.
+/// TODO(dev FX) :
+///   1. Lire la vue <c>FxSentryOptions.ViewName</c> filtrée sur la date métier
+///      (EF Core entité « keyless » en lecture seule, ou Dapper).
+///   2. Mapper chaque ligne vers <see cref="AppTransaction"/> (Source = FxSentry).
+///   3. Traduire une indisponibilité SQL en
+///      <see cref="TransactionSourceUnavailableException"/>.
+/// </summary>
+public sealed class FxSentryTransactionSource(IOptions<FxSentryOptions> options, ILogger<FxSentryTransactionSource> logger) : IFxSentryTransactionSource
+{
+    private readonly FxSentryOptions _options = options.Value;
+
+    public Task<IReadOnlyCollection<AppTransaction>> GetTransactionsAsync(DateOnly businessDate, CancellationToken cancellationToken)
+    {
+        logger.LogInformation(
+            "[STUB FX] {BusinessDate} — vue {ViewName}. 0 transaction (adapter à implémenter).",
+            businessDate, _options.ViewName);
+
+        return Task.FromResult<IReadOnlyCollection<AppTransaction>>([]);
+    }
+}
+
+//end FxSentryTransactionSource
+
+
+//Cbp Transactions source
+using System.ComponentModel.DataAnnotations;
+using System.Globalization;
+using System.Text.Json.Serialization;
+using IntegriteCBPFx.SharedKernel.Transactions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace IntegriteCBPFx.App.Features.Verification;
+
+/// <summary>Options du client API CBP (section « Cbp » de appsettings).</summary>
+public sealed class CbpApiOptions
+{
+    public const string SectionName = "Cbp";
+
+    /// <summary>URL de base de l'API CBP.</summary>
+    [Required]
+    public Uri? BaseUrl { get; set; }
+
+    /// <summary>Chemin relatif de l'endpoint des transactions.</summary>
+    public string TransactionsPath { get; set; } = "/api/transactions";
+
+    /// <summary>
+    /// Statuts de transactions demandés. Défaut effectif si non configuré : ["ALL"].
+    /// NB : laissé vide ici volontairement — le binder de config CONCATÈNE à la
+    /// valeur par défaut d'un tableau (sinon ["ALL"] + ["ALL"] => doublon).
+    /// </summary>
+    public string[] Status { get; set; } = [];
+
+    /// <summary>Délai d'attente par requête (secondes).</summary>
+    [Range(1, 600)]
+    public int TimeoutSeconds { get; set; } = 100;
+
+    /// <summary>Clé d'API (à fournir via secret/variable d'environnement, jamais en clair dans le repo).</summary>
+    public string? ApiKey { get; set; }
+}
+
+/// <summary>
+/// Paramètres de requête de l'API CBP pour extraire les transactions.
+/// </summary>
+/// <remarks>Dates au format <c>YYYYMMDD</c>. Pour un run sur une date métier
+/// unique, <see cref="FromTradeDate"/> = <see cref="ToTradeDate"/>.</remarks>
+public sealed class CbpTransactionRequest
+{
+    /// <summary>Référence unique permettant de retracer la requête (corrélation/observabilité).</summary>
+    [JsonPropertyName("requestId")]
+    public required string RequestId { get; init; }
+
+    /// <summary>Statuts demandés, p. ex. <c>["ALL"]</c>.</summary>
+    [JsonPropertyName("status")]
+    public required IReadOnlyList<string> Status { get; init; }
+
+    /// <summary>Date de trade de début (format YYYYMMDD).</summary>
+    [JsonPropertyName("fromTradeDate")]
+    public required string FromTradeDate { get; init; }
+
+    /// <summary>Date de trade de fin (format YYYYMMDD).</summary>
+    [JsonPropertyName("toTradeDate")]
+    public required string ToTradeDate { get; init; }
+}
+
+/// <summary>
+/// Adapter CBP (ResultSet A). HttpClient typé : sa configuration (BaseAddress,
+/// timeout, en-têtes, résilience) est faite dans <c>VerificationModule</c>.
+///
+/// 🚧 STUB walking-skeleton : construit la requête réelle (requestId/status/dates)
+/// mais renvoie une liste vide pour que le squelette tourne.
+/// TODO(dev CBP) :
+///   1. Envoyer <see cref="CbpTransactionRequest"/> à l'API via <c>httpClient</c>
+///      (selon le contrat CBP : POST JSON, ou GET avec query params).
+///   2. Désérialiser la réponse (DTO dédié, découplé du domaine).
+///   3. Mapper chaque ligne vers <see cref="AppTransaction"/> (Source = Cbp).
+///   4. Traduire toute panne (HttpRequestException / timeout) en
+///      <see cref="TransactionSourceUnavailableException"/> (cas « API down »).
+/// </summary>
+public sealed class CbpTransactionSource(
+    HttpClient httpClient,
+    IOptions<CbpApiOptions> options,
+    ILogger<CbpTransactionSource> logger) : ICbpTransactionSource
+{
+    private readonly CbpApiOptions _options = options.Value;
+
+    public Task<IReadOnlyCollection<AppTransaction>> GetTransactionsAsync(DateOnly businessDate, CancellationToken cancellationToken)
+    {
+        var request = BuildRequest(businessDate);
+
+        logger.LogInformation(
+            "[STUB CBP] requestId={RequestId} status=[{Status}] from={From} to={To} — BaseAddress={BaseAddress}. 0 transaction (adapter à implémenter).",
+            request.RequestId, string.Join(',', request.Status), request.FromTradeDate, request.ToTradeDate, httpClient.BaseAddress);
+
+        return Task.FromResult<IReadOnlyCollection<AppTransaction>>([]);
+    }
+
+    /// <summary>
+    /// Construit la requête CBP pour la date métier. requestId généré par appel
+    /// pour la traçabilité (corrélé au run via le scope de log).
+    /// </summary>
+    private CbpTransactionRequest BuildRequest(DateOnly businessDate)
+    {
+        var tradeDate = businessDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+        return new CbpTransactionRequest
+        {
+            RequestId = Guid.NewGuid().ToString("N"),
+            Status = _options.Status.Length > 0 ? _options.Status : ["ALL"],
+            FromTradeDate = tradeDate,
+            ToTradeDate = tradeDate,
+        };
+    }
+}
+
+
+//end CBP transactions source
