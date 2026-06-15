@@ -1,0 +1,557 @@
+//SharedKernel
+
+
+//AnomalyTransaction
+using System.Text.Json;
+
+namespace IntegriteCBPFX.SharedKernel.Anomalies;
+
+/// <summary>
+/// Anomalie d'intégrité persistée (table <c>cbp.AnomalyTransaction</c>) et exposée
+/// au Back-Office via Denodo. Aucune donnée confidentielle : pour le code 3, seule
+/// la LISTE des noms de champs en écart est stockée (<see cref="ChampsErreurs"/>).
+/// </summary>
+public sealed class AnomalyTransaction
+{
+    // ctor privé : les instances sont créées via les fabriques statiques ci-dessous.
+    private AnomalyTransaction()
+    {
+        DescriptionErreur = string.Empty;
+    }
+
+    public Guid Id { get; private set; }
+
+    /// <summary>Horodatage UTC de détection (colonne DateCreationErreur).</summary>
+    public DateTimeOffset DateCreationErreur { get; private set; }
+
+    /// <summary>Identifiant de la transaction CBP (null si l'anomalie est « FX absente de CBP »).</summary>
+    public string? IdCBPTransaction { get; private set; }
+
+    /// <summary>Identifiant de la transaction FXSentry (null si l'anomalie est « CBP absente de FX »).</summary>
+    public string? IdFxSentryTransaction { get; private set; }
+
+    public AnomalyCode CodeErreur { get; private set; }
+
+    public string DescriptionErreur { get; private set; }
+
+    /// <summary>Liste JSON des champs en écart (renseignée pour le code 3 uniquement).</summary>
+    public string? ChampsErreurs { get; private set; }
+
+    /// <summary>Code 1 : transaction CBP absente de FXSentry.</summary>
+    public static AnomalyTransaction CbpNotInFxSentry(string cbpTransactionId, DateTimeOffset detectedAtUtc) => new()
+    {
+        Id = Guid.NewGuid(),
+        DateCreationErreur = detectedAtUtc,
+        IdCBPTransaction = cbpTransactionId,
+        CodeErreur = AnomalyCode.CbpNotInFxSentry,
+        DescriptionErreur = "Transaction CBP absente de FXSentry.",
+    };
+
+    /// <summary>Code 2 : transaction FXSentry absente de CBP.</summary>
+    public static AnomalyTransaction FxSentryNotInCbp(string fxSentryTransactionId, DateTimeOffset detectedAtUtc) => new()
+    {
+        Id = Guid.NewGuid(),
+        DateCreationErreur = detectedAtUtc,
+        IdFxSentryTransaction = fxSentryTransactionId,
+        CodeErreur = AnomalyCode.FxSentryNotInCbp,
+        DescriptionErreur = "Transaction FXSentry absente de CBP.",
+    };
+
+    /// <summary>Code 3 : transaction présente des deux côtés, avec des champs en écart.</summary>
+    public static AnomalyTransaction FieldDifferences(
+        string cbpTransactionId,
+        string fxSentryTransactionId,
+        IReadOnlyList<string> fieldsInError,
+        DateTimeOffset detectedAtUtc)
+    {
+        ArgumentNullException.ThrowIfNull(fieldsInError);
+        return new AnomalyTransaction
+        {
+            Id = Guid.NewGuid(),
+            DateCreationErreur = detectedAtUtc,
+            IdCBPTransaction = cbpTransactionId,
+            IdFxSentryTransaction = fxSentryTransactionId,
+            CodeErreur = AnomalyCode.FieldDifferences,
+            DescriptionErreur = $"Écart(s) détecté(s) sur {fieldsInError.Count} champ(s).",
+            ChampsErreurs = JsonSerializer.Serialize(fieldsInError),
+        };
+    }
+}
+
+//End AnomalyTransaction
+
+
+//TransactionComparer
+using IntegriteCBPFX.SharedKernel.Transactions;
+
+namespace IntegriteCBPFX.SharedKernel.Comparison;
+
+/// <summary>
+/// Implémente les règles de comparaison CBP / FXSentry (cf. docs/SPEC-verification.md).
+/// Les tolérances encodent la notion de « différence justifiable » : en deçà, aucun écart.
+/// </summary>
+public sealed class TransactionComparer : ITransactionComparer
+{
+    // Tolérances métier.
+    private const decimal RateTolerance = 0.00001m;     // 1E-5 sur les taux
+    private const decimal AmountTolerance = 0.01m;      // 0.01 sur les montants
+    private const decimal MarginTolerance = 0.00000001m; // 1E-8 sur les marges
+
+    // Mapping status CBP -> ACTIVE_TRADE_STATUS FXSentry.
+    private static readonly Dictionary<string, int> StatusMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["TRADE_DONE"] = 1,
+        ["RFQ Cancelled"] = 0,
+    };
+
+    // Mapping channelId CBP -> ORIGINAL_MASTER FXSentry.
+    private static readonly Dictionary<string, int> ChannelMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["WEB"] = 293,
+        ["SDP"] = 295,
+    };
+
+    private const string SdpChannel = "SDP";
+
+    public IReadOnlyList<string> Compare(CbpTransaction cbp, IReadOnlyList<FxSentryTransaction> fxRowsByValueDate)
+    {
+        ArgumentNullException.ThrowIfNull(cbp);
+        ArgumentNullException.ThrowIfNull(fxRowsByValueDate);
+
+        var fields = new List<string>();
+        if (fxRowsByValueDate.Count == 0)
+        {
+            return fields;
+        }
+
+        var near = fxRowsByValueDate[0];
+        var far = fxRowsByValueDate.Count > 1 ? fxRowsByValueDate[1] : null;
+
+        CompareHeader(cbp, near, far, fields);
+
+        CompareLeg(cbp.NearLeg, near, cbp.TradeAction, isFarLeg: false, prefix: string.Empty, fields);
+
+        if (cbp.FarLeg is not null)
+        {
+            if (far is null)
+            {
+                fields.Add("farDateDetail"); // swap CBP mais une seule ligne FXSentry
+            }
+            else
+            {
+                CompareLeg(cbp.FarLeg, far, cbp.TradeAction, isFarLeg: true, prefix: "farDateDetail.", fields);
+            }
+        }
+
+        return fields;
+    }
+
+    private static void CompareHeader(CbpTransaction cbp, FxSentryTransaction near, FxSentryTransaction? far, List<string> fields)
+    {
+        // status
+        if (!StatusMap.TryGetValue(cbp.Status, out var expectedStatus) || expectedStatus != near.ActiveTradeStatus)
+        {
+            fields.Add("status");
+        }
+
+        // symbol : Cur1Cur2 attendu = BASE_CODE + CURRENCY_CODE (résolus via C_CROSS).
+        var expectedSymbol = near.CrossBaseCode + near.CrossCurrencyCode;
+        if (!string.Equals(cbp.Symbol, expectedSymbol, StringComparison.OrdinalIgnoreCase))
+        {
+            fields.Add("symbol");
+        }
+
+        // tradeAction : cohérence du sens via les devises BUY/SELL vs BASE_CODE.
+        var tradeActionOk = CurrencyDirectionOk(cbp.TradeAction.LegSide(isFarLeg: false), near);
+        if (cbp.IsSwap && far is not null)
+        {
+            tradeActionOk &= CurrencyDirectionOk(cbp.TradeAction.LegSide(isFarLeg: true), far);
+        }
+
+        if (!tradeActionOk)
+        {
+            fields.Add("tradeAction");
+        }
+
+        // notionalCurrency
+        if (!string.Equals(cbp.NotionalCurrency, near.SetCurrency, StringComparison.OrdinalIgnoreCase))
+        {
+            fields.Add("notionalCurrency");
+        }
+
+        // userNm : comparé uniquement si la provenance est SDP (JavaBankTrader).
+        if (string.Equals(cbp.ChannelId, SdpChannel, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(Normalize(cbp.UserNm), Normalize(near.UserId), StringComparison.OrdinalIgnoreCase))
+        {
+            fields.Add("userNm");
+        }
+
+        // customerRef
+        if (!string.Equals(cbp.CustomerRef, near.CustomerCode, StringComparison.OrdinalIgnoreCase))
+        {
+            fields.Add("customerRef");
+        }
+
+        // channelId
+        if (!ChannelMap.TryGetValue(cbp.ChannelId, out var expectedChannel) || expectedChannel != near.OriginalMaster)
+        {
+            fields.Add("channelId");
+        }
+
+        // comment
+        if (!string.Equals(Normalize(cbp.Comment), Normalize(near.Remark), StringComparison.Ordinal))
+        {
+            fields.Add("comment");
+        }
+    }
+
+    private static void CompareLeg(CbpLeg leg, FxSentryTransaction row, CbpTradeAction action, bool isFarLeg, string prefix, List<string> fields)
+    {
+        // tradeRate (taux inversé si CROSS_FLIPPED).
+        if (!RatesMatch(leg.TradeRate, row))
+        {
+            fields.Add(prefix + "tradeRate");
+        }
+
+        // valueDate
+        if (leg.ValueDate != row.ValueDate)
+        {
+            fields.Add(prefix + "valueDate");
+        }
+
+        // tradeDate : tolérée J ou J+1 (rollover CBP plus tôt que FXSentry).
+        if (leg.TradeDate != row.TradeDate && leg.TradeDate != row.TradeDate.AddDays(1))
+        {
+            fields.Add(prefix + "tradeDate");
+        }
+
+        var side = action.LegSide(isFarLeg);
+
+        // currency1Amt (devise de base) : B => SELL_AMOUNT, S => BUY_AMOUNT.
+        var fxCur1 = side == LegSide.Buy ? row.SellAmount : row.BuyAmount;
+        if (Math.Abs(leg.Currency1Amt - fxCur1) > AmountTolerance)
+        {
+            fields.Add(prefix + "currency1Amt");
+        }
+
+        // currency2Amt : B => BUY_AMOUNT, S => SELL_AMOUNT.
+        var fxCur2 = side == LegSide.Buy ? row.BuyAmount : row.SellAmount;
+        if (Math.Abs(leg.Currency2Amt - fxCur2) > AmountTolerance)
+        {
+            fields.Add(prefix + "currency2Amt");
+        }
+
+        // salesMargin (formule inversée si CROSS_FLIPPED).
+        if (!MarginsMatch(leg.SalesMargin, row))
+        {
+            fields.Add(prefix + "salesMargin");
+        }
+    }
+
+    private static bool CurrencyDirectionOk(LegSide side, FxSentryTransaction row) => side == LegSide.Buy
+        ? string.Equals(row.SellCurrency, row.CrossBaseCode, StringComparison.OrdinalIgnoreCase)
+        : string.Equals(row.BuyCurrency, row.CrossBaseCode, StringComparison.OrdinalIgnoreCase);
+
+    private static bool RatesMatch(decimal cbpRate, FxSentryTransaction row)
+    {
+        if (row.FxRate == 0m)
+        {
+            return false;
+        }
+
+        var fxRate = row.CrossFlipped ? 1m / row.FxRate : row.FxRate;
+        return Math.Abs(cbpRate - fxRate) < RateTolerance;
+    }
+
+    private static bool MarginsMatch(decimal cbpMargin, FxSentryTransaction row)
+    {
+        if (!row.CrossFlipped)
+        {
+            return Math.Abs(cbpMargin - row.FxSpread) <= MarginTolerance;
+        }
+
+        var baseRate = row.FxRate - row.FxSpread;
+        if (row.FxRate == 0m || baseRate == 0m)
+        {
+            return false;
+        }
+
+        // SpreadFlipped = (1 / AllInRate) - (1 / BaseRate)
+        var spreadFlipped = (1m / row.FxRate) - (1m / baseRate);
+        return Math.Abs(cbpMargin - spreadFlipped) <= MarginTolerance;
+    }
+
+    private static string Normalize(string? value) => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();
+}
+
+//End TransactionComparer
+
+
+//CbpLeg
+
+namespace IntegriteCBPFX.SharedKernel.Transactions;
+
+/// <summary>
+/// Détail d'une jambe d'un contrat de change CBP (« nearDateDetail » / « farDateDetail »).
+/// </summary>
+/// <param name="TradeRate">Taux « all in » (champ CBP « tradeRate »).</param>
+/// <param name="ValueDate">Date de valeur / d'échéance.</param>
+/// <param name="TradeDate">Date de création de la transaction (sujette au rollover CBP).</param>
+/// <param name="Currency1Amt">Montant dans la 1re devise (devise de base).</param>
+/// <param name="Currency2Amt">Montant dans la 2e devise.</param>
+/// <param name="SalesMargin">Marge de vente.</param>
+public sealed record CbpLeg(
+    decimal TradeRate,
+    DateOnly ValueDate,
+    DateOnly TradeDate,
+    decimal Currency1Amt,
+    decimal Currency2Amt,
+    decimal SalesMargin);
+
+
+//End CbpLeg
+
+// CbpTradeAction
+namespace IntegriteCBPFX.SharedKernel.Transactions;
+
+/// <summary>Action de change CBP, du point de vue du CLIENT.</summary>
+public enum CbpTradeAction
+{
+    /// <summary>« B » : le client achète la devise de base.</summary>
+    Buy,
+
+    /// <summary>« S » : le client vend la devise de base.</summary>
+    Sell,
+
+    /// <summary>« BS » : swap, Buy sur la near leg puis Sell sur la far leg.</summary>
+    BuySell,
+
+    /// <summary>« SB » : swap, Sell sur la near leg puis Buy sur la far leg.</summary>
+    SellBuy,
+}
+
+/// <summary>Sens effectif d'une jambe (résolu à partir de <see cref="CbpTradeAction"/>).</summary>
+public enum LegSide
+{
+    Buy,
+    Sell,
+}
+
+public static class CbpTradeActionExtensions
+{
+    /// <summary>Parse la valeur CBP (« B », « S », « BS », « SB »).</summary>
+    public static CbpTradeAction Parse(string? value) => value?.Trim().ToUpperInvariant() switch
+    {
+        "B" => CbpTradeAction.Buy,
+        "S" => CbpTradeAction.Sell,
+        "BS" => CbpTradeAction.BuySell,
+        "SB" => CbpTradeAction.SellBuy,
+        _ => throw new ArgumentException($"tradeAction CBP inconnu : « {value} ».", nameof(value)),
+    };
+
+    /// <summary>
+    /// Sens effectif d'une jambe. Pour un swap, la near leg et la far leg ont des sens inverses.
+    /// </summary>
+    public static LegSide LegSide(this CbpTradeAction action, bool isFarLeg) => action switch
+    {
+        CbpTradeAction.Buy => Transactions.LegSide.Buy,
+        CbpTradeAction.Sell => Transactions.LegSide.Sell,
+        CbpTradeAction.BuySell => isFarLeg ? Transactions.LegSide.Sell : Transactions.LegSide.Buy,
+        CbpTradeAction.SellBuy => isFarLeg ? Transactions.LegSide.Buy : Transactions.LegSide.Sell,
+        _ => throw new ArgumentOutOfRangeException(nameof(action)),
+    };
+}
+
+//End CbpTradeAction
+
+//CbpTransaction
+namespace IntegriteCBPFX.SharedKernel.Transactions;
+
+/// <summary>
+/// Contrat de change extrait de CBP (ResultSet A). La clé de rapprochement avec
+/// FXSentry est <see cref="TransId"/> (= CUST_REF côté FXSentry).
+/// Un swap porte une <see cref="FarLeg"/> et génère 2 transactions côté FXSentry.
+/// </summary>
+public sealed record CbpTransaction
+{
+    /// <summary>ID de la transaction CBP (clé de rapprochement, = CUST_REF FXSentry).</summary>
+    public required string TransId { get; init; }
+
+    /// <summary>Statut du contrat (« TRADE_DONE », « RFQ Cancelled »...).</summary>
+    public required string Status { get; init; }
+
+    /// <summary>Paire de devises sous la forme Cur1Cur2 (p. ex. « USDCAD »).</summary>
+    public required string Symbol { get; init; }
+
+    /// <summary>Sens de la transaction (du point de vue client).</summary>
+    public required CbpTradeAction TradeAction { get; init; }
+
+    /// <summary>Devise du notionnel.</summary>
+    public required string NotionalCurrency { get; init; }
+
+    /// <summary>LoginId de l'utilisateur ayant transigé (comparé uniquement si canal SDP).</summary>
+    public string? UserNm { get; init; }
+
+    /// <summary>Code client CBP.</summary>
+    public required string CustomerRef { get; init; }
+
+    /// <summary>Origine de la transaction (« WEB », « SDP »).</summary>
+    public required string ChannelId { get; init; }
+
+    /// <summary>Commentaire libre.</summary>
+    public string? Comment { get; init; }
+
+    /// <summary>Near leg (toujours présente).</summary>
+    public required CbpLeg NearLeg { get; init; }
+
+    /// <summary>Far leg (présente uniquement pour les swaps).</summary>
+    public CbpLeg? FarLeg { get; init; }
+
+    /// <summary>Vrai si la transaction est un swap (2 jambes).</summary>
+    public bool IsSwap => FarLeg is not null;
+}
+
+//End CbpTransaction
+
+
+
+//FxSentryTransaction
+namespace IntegriteCBPFX.SharedKernel.Transactions;
+
+/// <summary>
+/// Transaction FXSentry (ResultSet B), projection d'une ligne de la vue
+/// <c>cube.F_FRONTOFFICE</c> (jointures C_CROSS / filtres appliqués par la vue).
+/// Un swap CBP correspond à 2 lignes partageant <see cref="CustRef"/>, distinguées
+/// par <see cref="ValueDate"/> (near &lt; far) et des sens BUY/SELL inversés.
+/// </summary>
+public sealed record FxSentryTransaction
+{
+    /// <summary>CUST_REF — clé de rapprochement (= transId CBP).</summary>
+    public required string CustRef { get; init; }
+
+    /// <summary>TRADE_NUMBER — identifiant de la ligne FXSentry.</summary>
+    public required string TradeNumber { get; init; }
+
+    /// <summary>ACTIVE_TRADE_STATUS (1 = done, 0 = annulé).</summary>
+    public required int ActiveTradeStatus { get; init; }
+
+    /// <summary>C_CROSS.BASE_CODE — devise de base (= CBP_Cur1). Résolu par la vue.</summary>
+    public required string CrossBaseCode { get; init; }
+
+    /// <summary>C_CROSS.CURRENCY_CODE — 2e devise (= CBP_Cur2). Résolu par la vue.</summary>
+    public required string CrossCurrencyCode { get; init; }
+
+    /// <summary>CROSS_FLIPPED (0/1) — indique si le taux doit être inversé pour la comparaison.</summary>
+    public required bool CrossFlipped { get; init; }
+
+    /// <summary>BUY_CURRENCY — devise achetée par la banque.</summary>
+    public required string BuyCurrency { get; init; }
+
+    /// <summary>SELL_CURRENCY — devise vendue par la banque.</summary>
+    public required string SellCurrency { get; init; }
+
+    /// <summary>SET_CURRENCY — devise de règlement.</summary>
+    public required string SetCurrency { get; init; }
+
+    /// <summary>USER_ID.</summary>
+    public string? UserId { get; init; }
+
+    /// <summary>CUSTOMER_CODE.</summary>
+    public required string CustomerCode { get; init; }
+
+    /// <summary>ORIGINAL_MASTER (canal : 293 = WEB, 295 = SDP...).</summary>
+    public required int OriginalMaster { get; init; }
+
+    /// <summary>REMARK (commentaire).</summary>
+    public string? Remark { get; init; }
+
+    /// <summary>FX_RATE — taux all-in.</summary>
+    public required decimal FxRate { get; init; }
+
+    /// <summary>FX_SPREAD — marge.</summary>
+    public required decimal FxSpread { get; init; }
+
+    /// <summary>VALUE_DATE.</summary>
+    public required DateOnly ValueDate { get; init; }
+
+    /// <summary>TRADE_DATE.</summary>
+    public required DateOnly TradeDate { get; init; }
+
+    /// <summary>BUY_AMOUNT — montant acheté par la banque.</summary>
+    public required decimal BuyAmount { get; init; }
+
+    /// <summary>SELL_AMOUNT — montant vendu par la banque.</summary>
+    public required decimal SellAmount { get; init; }
+}
+
+//End FxSentryTransaction
+
+
+//VerificationEngine
+using IntegriteCBPFX.SharedKernel.Anomalies;
+using IntegriteCBPFX.SharedKernel.Comparison;
+using IntegriteCBPFX.SharedKernel.Transactions;
+
+namespace IntegriteCBPFX.SharedKernel.Verification;
+
+/// <summary>
+/// Cœur métier de la vérification d'intégrité : rapproche les transactions CBP et
+/// FXSentry par clé (transId = CUST_REF), applique les règles de comparaison et
+/// produit les anomalies (codes 1/2/3).
+///
+/// Rapprochement des swaps : une transaction CBP swap (near + far) correspond à
+/// 2 lignes FXSentry de même CUST_REF, triées par VALUE_DATE croissante.
+/// </summary>
+public sealed class VerificationEngine(ITransactionComparer comparer)
+{
+    public IReadOnlyList<AnomalyTransaction> Verify(
+        IReadOnlyCollection<CbpTransaction> cbpTransactions,
+        IReadOnlyCollection<FxSentryTransaction> fxTransactions,
+        DateTimeOffset detectedAtUtc)
+    {
+        ArgumentNullException.ThrowIfNull(cbpTransactions);
+        ArgumentNullException.ThrowIfNull(fxTransactions);
+
+        // Index des transactions FX par clé (jambes near/far d'un swap triées par VALUE_DATE),
+        // et ensemble des clés CBP — les deux donnent des lookups O(1).
+        var fxByRef = fxTransactions
+            .GroupBy(f => f.CustRef, StringComparer.Ordinal)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderBy(f => f.ValueDate).ToArray(),
+                StringComparer.Ordinal);
+
+        var cbpIds = cbpTransactions.Select(c => c.TransId).ToHashSet(StringComparer.Ordinal);
+
+        var anomalies = new List<AnomalyTransaction>();
+
+        // Côté CBP : absente de FXSentry => code 1 ; sinon comparaison => code 3 si écarts.
+        foreach (var cbp in cbpTransactions)
+        {
+            if (!fxByRef.TryGetValue(cbp.TransId, out var rows) || rows.Length == 0)
+            {
+                anomalies.Add(AnomalyTransaction.CbpNotInFxSentry(cbp.TransId, detectedAtUtc));
+                continue;
+            }
+
+            var fieldsInError = comparer.Compare(cbp, rows);
+            if (fieldsInError.Count > 0)
+            {
+                anomalies.Add(AnomalyTransaction.FieldDifferences(cbp.TransId, rows[0].TradeNumber, fieldsInError, detectedAtUtc));
+            }
+        }
+
+        // Côté FXSentry : chaque ligne sans contrepartie CBP => code 2 (boucle plate, sans imbrication).
+        foreach (var fx in fxTransactions)
+        {
+            if (!cbpIds.Contains(fx.CustRef))
+            {
+                anomalies.Add(AnomalyTransaction.FxSentryNotInCbp(fx.TradeNumber, detectedAtUtc));
+            }
+        }
+
+        return anomalies;
+    }
+}
+
+//End VerificationEngine
