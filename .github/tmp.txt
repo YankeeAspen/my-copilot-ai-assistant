@@ -1,4 +1,232 @@
-//FxSentryTransactionSource
+//NotifierTests
+using IntegriteCBPFX.App.Features.Verification;
+using IntegriteCBPFX.SharedKernel.Verification;
+using IntegriteCBPFX.Tests.TestSupport;
+using Microsoft.Extensions.Logging;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests.Features.Verification;
+
+/// <summary>Stub de notification : journalise un avertissement reprenant le run et le nb d'anomalies.</summary>
+public sealed class NotifierTests
+{
+    private static readonly DateTimeOffset Now = new(2026, 6, 15, 22, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task NotifyAsync_Logs_Warning_With_Run_Details()
+    {
+        // Arrange
+        var logger = new RecordingLogger<Notifier>();
+        var run = VerificationRun.Start(Guid.NewGuid(), new DateOnly(2026, 6, 15), Now);
+        run.Complete(Now.AddMinutes(2), cbpCount: 10, fxCount: 12, anomalyCount: 3);
+
+        // Act
+        await new Notifier(logger).NotifyAsync(run, CancellationToken.None);
+
+        // Assert
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Warning, entry.Level);
+        Assert.Contains(run.Id.ToString(), entry.Message);
+        Assert.Contains("3 anomalie", entry.Message);
+    }
+
+    [Fact]
+    public async Task NotifyAsync_Null_Run_Throws()
+    {
+        var notifier = new Notifier(new RecordingLogger<Notifier>());
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() => notifier.NotifyAsync(null!, CancellationToken.None));
+    }
+}
+
+//end NotifierTests
+
+//CbpBearerTokenHandlerTests
+using System.Net;
+using IntegriteCBPFX.App.Features.Verification;
+using IntegriteCBPFX.Tests.TestSupport;
+using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests.Features.Verification;
+
+/// <summary>Le handler injecte le bearer token (fourni par ICbpTokenProvider) dans l'en-tête Authorization.</summary>
+public sealed class CbpBearerTokenHandlerTests
+{
+    [Fact]
+    public async Task SendAsync_Adds_Bearer_Authorization_Header()
+    {
+        // Arrange — provider renvoie un token, handler interne capture la requête sortante.
+        var tokenProvider = Substitute.For<ICbpTokenProvider>();
+        tokenProvider.GetTokenAsync(Arg.Any<CancellationToken>()).Returns("tok-123");
+
+        HttpRequestMessage? sent = null;
+        var inner = new RoutingHttpMessageHandler(req =>
+        {
+            sent = req;
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        });
+        var handler = new CbpBearerTokenHandler(tokenProvider, NullLogger<CbpBearerTokenHandler>.Instance) { InnerHandler = inner };
+        using var invoker = new HttpMessageInvoker(handler);
+
+        // Act
+        using var response = await invoker.SendAsync(
+            new HttpRequestMessage(HttpMethod.Get, "https://cbp.test/api/transactions"), CancellationToken.None);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(sent!.Headers.Authorization);
+        Assert.Equal("Bearer", sent.Headers.Authorization!.Scheme);
+        Assert.Equal("tok-123", sent.Headers.Authorization.Parameter);
+        await tokenProvider.Received(1).GetTokenAsync(Arg.Any<CancellationToken>());
+    }
+}
+
+//end CbpBearerTokenHandlerTests
+
+//CbpTradeActionExtensionsTests
+using IntegriteCBPFX.SharedKernel.Transactions;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests.SharedKernel;
+
+/// <summary>Parsing « B/S/BS/SB » et résolution du sens effectif par jambe (near/far).</summary>
+public sealed class CbpTradeActionExtensionsTests
+{
+    [Theory]
+    [InlineData("B", CbpTradeAction.Buy)]
+    [InlineData("S", CbpTradeAction.Sell)]
+    [InlineData("BS", CbpTradeAction.BuySell)]
+    [InlineData("SB", CbpTradeAction.SellBuy)]
+    [InlineData(" bs ", CbpTradeAction.BuySell)]   // trim + insensible à la casse
+    public void Parse_Maps_Known_Values(string raw, CbpTradeAction expected)
+    {
+        Assert.Equal(expected, CbpTradeActionExtensions.Parse(raw));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("X")]
+    public void Parse_Throws_On_Unknown(string? raw)
+    {
+        Assert.Throws<ArgumentException>(() => CbpTradeActionExtensions.Parse(raw));
+    }
+
+    [Theory]
+    // Achat/vente simples : le sens est le même sur les deux jambes.
+    [InlineData(CbpTradeAction.Buy, false, LegSide.Buy)]
+    [InlineData(CbpTradeAction.Buy, true, LegSide.Buy)]
+    [InlineData(CbpTradeAction.Sell, false, LegSide.Sell)]
+    [InlineData(CbpTradeAction.Sell, true, LegSide.Sell)]
+    // Swaps : near et far ont des sens inverses.
+    [InlineData(CbpTradeAction.BuySell, false, LegSide.Buy)]
+    [InlineData(CbpTradeAction.BuySell, true, LegSide.Sell)]
+    [InlineData(CbpTradeAction.SellBuy, false, LegSide.Sell)]
+    [InlineData(CbpTradeAction.SellBuy, true, LegSide.Buy)]
+    public void LegSide_Resolves_Effective_Side(CbpTradeAction action, bool isFarLeg, LegSide expected)
+    {
+        Assert.Equal(expected, action.LegSide(isFarLeg));
+    }
+}
+
+//end CbpTradeActionExtensionsTests
+
+//FxTresorerieDbConnectionFactoryTests
+using IntegriteCBPFX.App.Common.Persistence;
+using Microsoft.Extensions.Configuration;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests.Common.Persistence;
+
+/// <summary>Fabrique de connexion : lit ConnectionStrings:Default et crée une SqlConnection par appel.</summary>
+public sealed class FxTresorerieDbConnectionFactoryTests
+{
+    private static IConfiguration ConfigWith(string? defaultConnectionString)
+    {
+        var data = new Dictionary<string, string?>();
+        if (defaultConnectionString is not null)
+        {
+            data["ConnectionStrings:Default"] = defaultConnectionString;
+        }
+
+        return new ConfigurationBuilder().AddInMemoryCollection(data).Build();
+    }
+
+    [Fact]
+    public void Create_Returns_A_New_SqlConnection_Per_Call()
+    {
+        var factory = new FxTresorerieDbConnectionFactory(
+            ConfigWith("Server=(local);Database=Db;Trusted_Connection=True;TrustServerCertificate=True"));
+
+        using var first = factory.Create();
+        using var second = factory.Create();
+
+        Assert.NotNull(first);
+        Assert.NotSame(first, second);   // une nouvelle connexion à chaque appel
+        Assert.Equal("Microsoft.Data.SqlClient.SqlConnection", first.GetType().FullName);
+    }
+
+    [Fact]
+    public void Constructor_Throws_When_Default_Connection_String_Missing()
+    {
+        Assert.Throws<InvalidOperationException>(() => new FxTresorerieDbConnectionFactory(ConfigWith(null)));
+    }
+}
+
+//end FxTresorerieDbConnectionFactoryTests
+
+//SystemClockTests
+using IntegriteCBPFX.SharedKernel.Time;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests.SharedKernel;
+
+/// <summary>Horloge système : instant courant en UTC (offset zéro).</summary>
+public sealed class SystemClockTests
+{
+    [Fact]
+    public void Current_Returns_Utc_Now()
+    {
+        var clock = new SystemClock();
+
+        var before = DateTimeOffset.UtcNow;
+        var current = clock.Current;
+        var after = DateTimeOffset.UtcNow;
+
+        Assert.Equal(TimeSpan.Zero, current.Offset);   // UTC
+        Assert.InRange(current, before, after);
+    }
+}
+
+//end SystemClockTests
+
+//RecordingLogger
+using Microsoft.Extensions.Logging;
+
+namespace IntegriteCBPFX.Tests.TestSupport;
+
+/// <summary>ILogger de test : capture chaque entrée (niveau + message formaté) pour assertion.</summary>
+public sealed class RecordingLogger<T> : ILogger<T>
+{
+    public List<(LogLevel Level, string Message)> Entries { get; } = [];
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+    {
+        ArgumentNullException.ThrowIfNull(formatter);
+        Entries.Add((logLevel, formatter(state, exception)));
+    }
+}
+
+//end RecordingLogger
+
+// FxSentryTransactionSource
+using System.Diagnostics.CodeAnalysis;
 using Dapper;
 using IntegriteCBPFX.App.Common.Persistence;
 using IntegriteCBPFX.SharedKernel.Transactions;
@@ -61,6 +289,13 @@ public sealed class FxSentryTransactionSource(
     // d'une entrée utilisateur, mais on durcit pour écarter toute injection via une config altérée.
     private readonly string _qualifiedViewName = BuildQualifiedViewName(options.Value);
 
+    [SuppressMessage(
+        "Security Hotspot", "S2077:Formatting SQL queries is security-sensitive",
+        Justification =
+            "Le seul élément interpolé non constant est le nom de vue, validé contre une liste blanche " +
+            "d'identifiants puis encadré en crochets (cf. QuoteIdentifier) — un nom d'objet SQL n'étant pas " +
+            "paramétrable. Les valeurs (plage de dates) passent par des paramètres Dapper " +
+            "(@FromTradeDate/@ToTradeDate) et les alias de colonnes sont des constantes nameof.")]
     public async Task<IReadOnlyCollection<FxSentryTransaction>> GetTransactionsAsync(VerificationDateRange range, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(range);
@@ -168,745 +403,6 @@ public sealed class FxSentryTransactionSource(
 }
 
 //end FxSentryTransactionSource
-
-//FxSentryTransactionSourceTests
-using IntegriteCBPFX.App.Common.Persistence;
-using IntegriteCBPFX.App.Features.Verification;
-using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
-using NSubstitute;
-using Xunit;
-
-namespace IntegriteCBPFX.Tests.Features.Verification;
-
-/// <summary>
-/// Sécurité : le nom de vue (identifiant SQL, NON paramétrable) est validé à la construction
-/// de l'adapter. Une valeur de config malformée doit faire échouer le démarrage — aucune chaîne
-/// non-identifiant ne peut atteindre le SQL (parade au hotspot « dynamic SQL »).
-/// </summary>
-public sealed class FxSentryTransactionSourceTests
-{
-    private static FxSentryTransactionSource Create(FxSentryOptions options) => new(
-        Substitute.For<IAppDbConnectionFactory>(),
-        Options.Create(options),
-        NullLogger<FxSentryTransactionSource>.Instance);
-
-    [Fact]
-    public void Constructor_Accepts_Default_Options()
-    {
-        Assert.Null(Record.Exception(() => Create(new FxSentryOptions())));
-    }
-
-    [Theory]
-    [InlineData("integrite", "CBP_V_INTEGRITE_F_FRONTOFFICE")]
-    [InlineData("dbo", "V_Test_123")]
-    [InlineData("_schema", "_view")]
-    public void Constructor_Accepts_Valid_Identifiers(string schema, string view)
-    {
-        Assert.Null(Record.Exception(() => Create(new FxSentryOptions { ViewSchema = schema, ViewName = view })));
-    }
-
-    [Theory]
-    [InlineData("integrite", "CBP_V; DROP TABLE x--")]   // tentative d'injection via la config
-    [InlineData("integrite", "vue avec espaces")]
-    [InlineData("integrite", "v[bad]")]
-    [InlineData("schema.dotted", "CBP_V")]               // le point n'est pas autorisé dans un identifiant
-    [InlineData("1nvalid", "CBP_V")]                     // commence par un chiffre
-    [InlineData("", "CBP_V")]                            // schéma vide
-    [InlineData("integrite", "")]                        // vue vide
-    public void Constructor_Rejects_Invalid_Identifier(string schema, string view)
-    {
-        Assert.Throws<InvalidOperationException>(
-            () => Create(new FxSentryOptions { ViewSchema = schema, ViewName = view }));
-    }
-}
-
-//end FxSentryTransactionSourceTests 
-
-//TransactionComparerTests
-using IntegriteCBPFX.SharedKernel.Comparison;
-using IntegriteCBPFX.SharedKernel.Transactions;
-using IntegriteCBPFX.Tests.TestSupport;
-using Xunit;
-
-namespace IntegriteCBPFX.Tests.SharedKernel;
-
-public sealed class TransactionComparerTests
-{
-    private readonly TransactionComparer _comparer = new();
-
-    [Fact]
-    public void When_Everything_Matches_Then_No_Difference()
-    {
-        // Arrange
-        var cbp = TransactionTestData.Cbp();
-        var fx = TransactionTestData.Fx();
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.Empty(fields);
-    }
-
-    [Fact]
-    public void Status_TradeDone_Vs_Cancelled_Is_Reported()
-    {
-        // Arrange
-        var cbp = TransactionTestData.Cbp();
-        var fx = TransactionTestData.Fx() with { ActiveTradeStatus = 0 };
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.Contains("status", fields);
-    }
-
-    [Fact]
-    public void Symbol_Built_From_Cross_Codes()
-    {
-        // Arrange
-        var cbp = TransactionTestData.Cbp() with { Symbol = "EURCAD" };
-        var fx = TransactionTestData.Fx();
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.Contains("symbol", fields);
-    }
-
-    [Fact]
-    public void TradeAction_Buy_Requires_SellCurrency_Equals_BaseCode()
-    {
-        // Arrange — Buy => la banque vend la devise de base : SELL_CURRENCY doit == BASE_CODE.
-        var cbp = TransactionTestData.Cbp();
-        var fx = TransactionTestData.Fx() with { SellCurrency = "CAD" };
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.Contains("tradeAction", fields);
-    }
-
-    [Fact]
-    public void Rate_Difference_Below_Tolerance_Is_Ignored()
-    {
-        // Arrange — écart 5E-6 < 1E-5.
-        var cbp = TransactionTestData.Cbp();
-        cbp = cbp with { NearLeg = cbp.NearLeg with { TradeRate = 1.355560m } };
-        var fx = TransactionTestData.Fx();
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.DoesNotContain("tradeRate", fields);
-    }
-
-    [Fact]
-    public void Rate_Difference_Above_Tolerance_Is_Reported()
-    {
-        // Arrange — écart 2E-5 > 1E-5.
-        var cbp = TransactionTestData.Cbp();
-        cbp = cbp with { NearLeg = cbp.NearLeg with { TradeRate = 1.355575m } };
-        var fx = TransactionTestData.Fx();
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.Contains("tradeRate", fields);
-    }
-
-    [Fact]
-    public void Rate_And_Margin_Are_Inverted_When_CrossFlipped()
-    {
-        // Arrange — taux attendu = 1/FxRate, marge attendue = formule flipped.
-        var cbp = TransactionTestData.Cbp();
-        cbp = cbp with { NearLeg = cbp.NearLeg with { TradeRate = 0.5m, SalesMargin = (1m / 2m) - (1m / (2m - 0.5m)) } };
-        var fx = TransactionTestData.Fx() with { CrossFlipped = true, FxRate = 2m, FxSpread = 0.5m };
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.DoesNotContain("tradeRate", fields);
-        Assert.DoesNotContain("salesMargin", fields);
-    }
-
-    [Fact]
-    public void SalesMargin_Raw_Value_Is_Rejected_When_CrossFlipped()
-    {
-        // Arrange — avec CROSS_FLIPPED, la marge attendue est INVERSÉE, pas FX_SPREAD brut.
-        var cbp = TransactionTestData.Cbp();
-        cbp = cbp with { NearLeg = cbp.NearLeg with { TradeRate = 0.5m, SalesMargin = 0.5m } };
-        var fx = TransactionTestData.Fx() with { CrossFlipped = true, FxRate = 2m, FxSpread = 0.5m };
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.Contains("salesMargin", fields);
-    }
-
-    [Fact]
-    public void Currency1Amt_Buy_Compares_With_SellAmount()
-    {
-        // Arrange — écart 1 > 0.01.
-        var cbp = TransactionTestData.Cbp();
-        var fx = TransactionTestData.Fx() with { SellAmount = 3001m };
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.Contains("currency1Amt", fields);
-    }
-
-    [Fact]
-    public void Currency2Amt_Buy_Compares_With_BuyAmount()
-    {
-        // Arrange
-        var cbp = TransactionTestData.Cbp();
-        var fx = TransactionTestData.Fx() with { BuyAmount = 4066m };
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.Contains("currency2Amt", fields);
-    }
-
-    [Fact]
-    public void Amount_Difference_Below_One_Cent_Is_Ignored()
-    {
-        // Arrange — écart 0.005 <= 0.01.
-        var cbp = TransactionTestData.Cbp();
-        var fx = TransactionTestData.Fx() with { SellAmount = 3000.005m };
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.DoesNotContain("currency1Amt", fields);
-    }
-
-    [Fact]
-    public void TradeDate_NextDay_Is_Tolerated_Rollover()
-    {
-        // Arrange — CBP daté J+1 (rollover).
-        var cbp = TransactionTestData.Cbp();
-        cbp = cbp with { NearLeg = cbp.NearLeg with { TradeDate = TransactionTestData.TradeDate.AddDays(1) } };
-        var fx = TransactionTestData.Fx();
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.DoesNotContain("tradeDate", fields);
-    }
-
-    [Fact]
-    public void TradeDate_TwoDaysApart_Is_Reported()
-    {
-        // Arrange
-        var cbp = TransactionTestData.Cbp();
-        cbp = cbp with { NearLeg = cbp.NearLeg with { TradeDate = TransactionTestData.TradeDate.AddDays(2) } };
-        var fx = TransactionTestData.Fx();
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.Contains("tradeDate", fields);
-    }
-
-    [Fact]
-    public void UserNm_Is_Compared_When_Channel_Is_Sdp()
-    {
-        // Arrange
-        var cbp = TransactionTestData.Cbp() with { UserNm = "autre.user" };
-        var fx = TransactionTestData.Fx();
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.Contains("userNm", fields);
-    }
-
-    [Fact]
-    public void UserNm_Is_Not_Compared_When_Channel_Is_Web()
-    {
-        // Arrange — canal WEB : userNm n'est pas comparé.
-        var cbp = TransactionTestData.Cbp() with { ChannelId = "WEB", UserNm = "autre.user" };
-        var fx = TransactionTestData.Fx() with { OriginalMaster = 293 };
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.DoesNotContain("userNm", fields);
-    }
-
-    [Fact]
-    public void ChannelId_Web_Maps_To_293()
-    {
-        // Arrange — CBP WEB attend ORIGINAL_MASTER 293 ; ici la ligne FX est 295 (SDP).
-        var cbp = TransactionTestData.Cbp() with { ChannelId = "WEB" };
-        var fx = TransactionTestData.Fx();
-
-        // Act
-        var fields = _comparer.Compare(cbp, [fx]);
-
-        // Assert
-        Assert.Contains("channelId", fields);
-    }
-}
-
-//end TransactionComparerTests
-
-//RunVerificationHandlerTests
-using IntegriteCBPFX.App.Features.Verification;
-using IntegriteCBPFX.SharedKernel.Anomalies;
-using IntegriteCBPFX.SharedKernel.Comparison;
-using IntegriteCBPFX.SharedKernel.Transactions;
-using IntegriteCBPFX.SharedKernel.Verification;
-using IntegriteCBPFX.Tests.TestSupport;
-using Microsoft.Extensions.Logging.Abstractions;
-using NSubstitute;
-using Xunit;
-
-namespace IntegriteCBPFX.Tests.Features.Verification;
-
-public sealed class RunVerificationHandlerTests
-{
-    private readonly ICbpTransactionSource _cbpSource = Substitute.For<ICbpTransactionSource>();
-    private readonly IFxSentryTransactionSource _fxSource = Substitute.For<IFxSentryTransactionSource>();
-    private readonly IVerificationStore _store = Substitute.For<IVerificationStore>();
-    private readonly INotifier _notifier = Substitute.For<INotifier>();
-    private readonly FixedClock _clock = new(new DateTimeOffset(2026, 5, 4, 8, 0, 0, TimeSpan.Zero));
-
-    private RunVerificationHandler CreateHandler() => new(
-        _cbpSource,
-        _fxSource,
-        new VerificationEngine(new TransactionComparer()),
-        _store,
-        _notifier,
-        _clock,
-        NullLogger<RunVerificationHandler>.Instance);
-
-    private void GivenSources(IReadOnlyCollection<CbpTransaction> cbp, IReadOnlyCollection<FxSentryTransaction> fx)
-    {
-        _cbpSource.GetTransactionsAsync(Arg.Any<VerificationDateRange>(), Arg.Any<CancellationToken>()).Returns(cbp);
-        _fxSource.GetTransactionsAsync(Arg.Any<VerificationDateRange>(), Arg.Any<CancellationToken>()).Returns(fx);
-    }
-
-    [Theory]
-    [InlineData(VerificationMode.Veille, "2026-05-03", "2026-05-04")]
-    [InlineData(VerificationMode.JourneeCourante, "2026-05-04", "2026-05-04")]
-    public void ResolveRange_Maps_Mode_To_Trade_Date_Range(VerificationMode mode, string from, string to)
-    {
-        // Arrange
-        var today = new DateOnly(2026, 5, 4);
-
-        // Act
-        var range = RunVerificationHandler.ResolveRange(mode, today);
-
-        // Assert
-        Assert.Equal(DateOnly.Parse(from), range.FromTradeDate);
-        Assert.Equal(DateOnly.Parse(to), range.ToTradeDate);
-    }
-
-    [Fact]
-    public async Task Veille_Mode_Passes_J_Minus_1_To_J_To_Sources()
-    {
-        // Arrange
-        GivenSources([], []);
-
-        // Act
-        await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
-
-        // Assert
-        await _cbpSource.Received(1).GetTransactionsAsync(
-            Arg.Is<VerificationDateRange>(r => r.FromTradeDate == new DateOnly(2026, 5, 3) && r.ToTradeDate == new DateOnly(2026, 5, 4)),
-            Arg.Any<CancellationToken>());
-    }
-
-    [Fact]
-    public async Task When_Source_Unavailable_Then_Run_Failed_And_Nothing_Persisted_Or_Notified()
-    {
-        // Arrange — la source CBP est indisponible.
-        _cbpSource.GetTransactionsAsync(Arg.Any<VerificationDateRange>(), Arg.Any<CancellationToken>())
-            .Returns<IReadOnlyCollection<CbpTransaction>>(_ => throw new TransactionSourceUnavailableException(TransactionSource.Cbp, "API down"));
-
-        // Act
-        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
-
-        // Assert
-        Assert.Equal(VerificationStatus.Failed, result.Status);
-        await _store.Received(1).SaveRunAsync(Arg.Is<VerificationRun>(r => r.Status == VerificationStatus.Failed), Arg.Any<CancellationToken>());
-        await _store.DidNotReceive().AddAnomaliesAsync(Arg.Any<IReadOnlyCollection<AnomalyTransaction>>(), Arg.Any<CancellationToken>());
-        await _notifier.DidNotReceive().NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
-    }
-
-    [Fact]
-    public async Task When_Anomalies_Then_Persisted_And_BackOffice_Notified()
-    {
-        // Arrange — CBP sans contrepartie FX => 1 anomalie (code 1).
-        GivenSources([TransactionTestData.Cbp()], []);
-
-        // Act
-        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
-
-        // Assert
-        Assert.Equal(VerificationStatus.Completed, result.Status);
-        Assert.Equal(1, result.AnomalyCount);
-        await _store.Received(1).AddAnomaliesAsync(Arg.Is<IReadOnlyCollection<AnomalyTransaction>>(a => a.Count == 1), Arg.Any<CancellationToken>());
-        await _notifier.Received(1).NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
-    }
-
-    [Fact]
-    public async Task When_No_Anomaly_Then_No_Notification()
-    {
-        // Arrange — paire concordante => 0 anomalie.
-        GivenSources([TransactionTestData.Cbp()], [TransactionTestData.Fx()]);
-
-        // Act
-        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
-
-        // Assert
-        Assert.Equal(VerificationStatus.Completed, result.Status);
-        Assert.Equal(0, result.AnomalyCount);
-        await _notifier.DidNotReceive().NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
-    }
-}
-
-//end RunVerificationHandlerTests
-
-// CbpTransactionSourceTests
-using System.Net;
-using IntegriteCBPFX.App.Features.Verification;
-using IntegriteCBPFX.SharedKernel.Transactions;
-using IntegriteCBPFX.Tests.TestSupport;
-using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
-using Xunit;
-
-namespace IntegriteCBPFX.Tests.Features.Verification;
-
-public sealed class CbpTransactionSourceTests
-{
-    private static readonly VerificationDateRange Range =
-        new(new DateOnly(2026, 4, 30), new DateOnly(2026, 5, 1));
-
-    private static CbpTransactionSource CreateSource(HttpStatusCode status, string json)
-    {
-        var httpClient = new HttpClient(new StubHttpMessageHandler(status, json))
-        {
-            BaseAddress = new Uri("http://localhost"),
-        };
-        var options = Options.Create(new CbpApiOptions { BaseUrl = new Uri("http://localhost") });
-        return new CbpTransactionSource(httpClient, options, NullLogger<CbpTransactionSource>.Instance);
-    }
-
-    private static Task<IReadOnlyCollection<CbpTransaction>> GetAsync(string json) =>
-        CreateSource(HttpStatusCode.OK, json).GetTransactionsAsync(Range, CancellationToken.None);
-
-    [Fact]
-    public async Task Maps_NonSwap_Transaction_From_Response()
-    {
-        // Arrange
-        const string json = """
-        {
-          "requestId": "r1",
-          "success": "true",
-          "errorCode": null,
-          "transactions": [
-            {
-              "transId": "T1", "status": "TRADE_DONE", "symbol": "USDCAD",
-              "tradeAction": "B", "notionalCurrency": "USD", "userNm": "marc.andre",
-              "customerRef": "BIOVEPHAR", "channelID": "SDP", "comment": "x",
-              "nearDateDetail": {
-                "tradeRate": 1.355555, "valueDate": "20260501", "tradeDate": "20260501",
-                "currency1Amt": 3000, "currency2Amt": 4065, "salesMargin": 0.000162
-              }
-            }
-          ]
-        }
-        """;
-
-        // Act
-        var result = await GetAsync(json);
-
-        // Assert
-        var tx = Assert.Single(result);
-        Assert.Equal("T1", tx.TransId);
-        Assert.Equal("TRADE_DONE", tx.Status);
-        Assert.Equal("USDCAD", tx.Symbol);
-        Assert.Equal(CbpTradeAction.Buy, tx.TradeAction);
-        Assert.Equal("USD", tx.NotionalCurrency);
-        Assert.Equal("marc.andre", tx.UserNm);
-        Assert.Equal("BIOVEPHAR", tx.CustomerRef);
-        Assert.Equal("SDP", tx.ChannelId);
-        Assert.Equal("x", tx.Comment);
-        Assert.False(tx.IsSwap);
-        Assert.Null(tx.FarLeg);
-
-        Assert.Equal(1.355555m, tx.NearLeg.TradeRate);
-        Assert.Equal(new DateOnly(2026, 5, 1), tx.NearLeg.ValueDate);
-        Assert.Equal(new DateOnly(2026, 5, 1), tx.NearLeg.TradeDate);
-        Assert.Equal(3000m, tx.NearLeg.Currency1Amt);
-        Assert.Equal(4065m, tx.NearLeg.Currency2Amt);
-        Assert.Equal(0.000162m, tx.NearLeg.SalesMargin);
-    }
-
-    [Fact]
-    public async Task Maps_Swap_With_Near_And_Far_Legs()
-    {
-        // Arrange
-        const string json = """
-        {
-          "requestId": "r1", "success": "true",
-          "transactions": [
-            {
-              "transId": "S1", "status": "TRADE_DONE", "symbol": "USDCAD",
-              "tradeAction": "BS", "notionalCurrency": "USD", "customerRef": "C", "channelID": "SDP",
-              "nearDateDetail": {
-                "tradeRate": 1.3, "valueDate": "20260501", "tradeDate": "20260501",
-                "currency1Amt": 1000, "currency2Amt": 1300, "salesMargin": 0.0001
-              },
-              "farDateDetail": {
-                "tradeRate": 1.31, "valueDate": "20260601", "tradeDate": "20260501",
-                "currency1Amt": 1000, "currency2Amt": 1310, "salesMargin": 0.0001
-              }
-            }
-          ]
-        }
-        """;
-
-        // Act
-        var result = await GetAsync(json);
-
-        // Assert
-        var tx = Assert.Single(result);
-        Assert.Equal(CbpTradeAction.BuySell, tx.TradeAction);
-        Assert.True(tx.IsSwap);
-        Assert.NotNull(tx.FarLeg);
-        Assert.Equal(new DateOnly(2026, 6, 1), tx.FarLeg!.ValueDate);
-        Assert.Equal(1.31m, tx.FarLeg.TradeRate);
-    }
-
-    [Theory]
-    [InlineData("B", CbpTradeAction.Buy)]
-    [InlineData("S", CbpTradeAction.Sell)]
-    [InlineData("BS", CbpTradeAction.BuySell)]
-    [InlineData("SB", CbpTradeAction.SellBuy)]
-    public async Task Parses_TradeAction_Variants(string raw, CbpTradeAction expected)
-    {
-        // Arrange
-        var json = $$"""
-        {
-          "success": "true",
-          "transactions": [
-            {
-              "transId": "T1", "status": "TRADE_DONE", "symbol": "USDCAD", "tradeAction": "{{raw}}",
-              "notionalCurrency": "USD", "customerRef": "C", "channelID": "SDP",
-              "nearDateDetail": { "tradeRate": 1.3, "valueDate": "20260501", "tradeDate": "20260501",
-                "currency1Amt": 1, "currency2Amt": 1, "salesMargin": 0 }
-            }
-          ]
-        }
-        """;
-
-        // Act
-        var result = await GetAsync(json);
-
-        // Assert
-        Assert.Equal(expected, Assert.Single(result).TradeAction);
-    }
-
-    [Fact]
-    public async Task Throws_When_Success_Is_False()
-    {
-        // Arrange
-        const string json = """
-        { "requestId": "r1", "success": "false", "errorCode": "E123", "transactions": [] }
-        """;
-
-        // Act + Assert
-        await Assert.ThrowsAsync<TransactionSourceUnavailableException>(() => GetAsync(json));
-    }
-
-    [Fact]
-    public async Task Returns_Empty_When_No_Transactions()
-    {
-        // Arrange
-        const string json = """{ "success": "true", "transactions": [] }""";
-
-        // Act
-        var result = await GetAsync(json);
-
-        // Assert
-        Assert.Empty(result);
-    }
-
-    [Fact]
-    public async Task Throws_When_Http_Error()
-    {
-        // Arrange
-        var source = CreateSource(HttpStatusCode.InternalServerError, "{}");
-
-        // Act + Assert
-        await Assert.ThrowsAsync<TransactionSourceUnavailableException>(
-            () => source.GetTransactionsAsync(Range, CancellationToken.None));
-    }
-}
-
-//end CbpTransactionSourceTests
-
-// SecretServerCbpTokenProviderTests
-using System.Net;
-using System.Text;
-using IntegriteCBPFX.App.Features.Verification;
-using IntegriteCBPFX.Tests.TestSupport;
-using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
-using Xunit;
-
-namespace IntegriteCBPFX.Tests.Features.Verification;
-
-public sealed class SecretServerCbpTokenProviderTests
-{
-    private static SecretServerCbpTokenProvider CreateProvider(Func<HttpRequestMessage, HttpResponseMessage> responder)
-    {
-        var factory = new StubHttpClientFactory(new RoutingHttpMessageHandler(responder), new Uri("https://vault.local"));
-        var options = Options.Create(new SecretServerOptions
-        {
-            BaseUrl = new Uri("https://vault.local"),
-            SecretName = "CBP-API-BearerToken",
-            TokenFieldSlug = "api-key",
-        });
-        return new SecretServerCbpTokenProvider(factory, options, NullLogger<SecretServerCbpTokenProvider>.Instance);
-    }
-
-    private static HttpResponseMessage Json(HttpStatusCode code, string body) =>
-        new(code) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-
-    // Routeur « happy path » : recherche par nom (IWA) -> lecture du champ.
-    private static HttpResponseMessage HappyPath(HttpRequestMessage request, string fieldBody = "\"the-cbp-token\"")
-    {
-        var path = request.RequestUri!.AbsolutePath;
-        if (path.Contains("/fields/", StringComparison.Ordinal))
-        {
-            return Json(HttpStatusCode.OK, fieldBody);
-        }
-
-        if (path.EndsWith("/secrets", StringComparison.Ordinal))
-        {
-            return Json(HttpStatusCode.OK, """{ "records": [ { "id": 42, "name": "CBP-API-BearerToken" } ] }""");
-        }
-
-        return new HttpResponseMessage(HttpStatusCode.NotFound);
-    }
-
-    [Fact]
-    public async Task Returns_Token_From_Vault()
-    {
-        // Arrange
-        var provider = CreateProvider(r => HappyPath(r));
-
-        // Act
-        var token = await provider.GetTokenAsync(CancellationToken.None);
-
-        // Assert
-        Assert.Equal("the-cbp-token", token);
-    }
-
-    [Fact]
-    public async Task Resolves_Secret_By_Name_Then_Reads_Field_By_Id_Via_WinAuth()
-    {
-        // Arrange — on capture les chemins appelés.
-        var paths = new List<string>();
-        var provider = CreateProvider(r =>
-        {
-            paths.Add(r.RequestUri!.PathAndQuery);
-            return HappyPath(r);
-        });
-
-        // Act
-        await provider.GetTokenAsync(CancellationToken.None);
-
-        // Assert
-        Assert.Contains(paths, p => p.StartsWith("/winauthwebservices/api/v1/secrets?", StringComparison.Ordinal) && p.Contains("CBP-API-BearerToken", StringComparison.Ordinal));
-        Assert.Contains("/winauthwebservices/api/v1/secrets/42/fields/api-key", paths);
-    }
-
-    [Fact]
-    public async Task Caches_Token_Across_Calls()
-    {
-        // Arrange — on compte les appels de recherche.
-        var searchCalls = 0;
-        var provider = CreateProvider(r =>
-        {
-            if (r.RequestUri!.AbsolutePath.EndsWith("/secrets", StringComparison.Ordinal))
-            {
-                searchCalls++;
-            }
-
-            return HappyPath(r);
-        });
-
-        // Act — deux récupérations consécutives.
-        await provider.GetTokenAsync(CancellationToken.None);
-        await provider.GetTokenAsync(CancellationToken.None);
-
-        // Assert — le coffre n'est interrogé qu'une fois (token mis en cache).
-        Assert.Equal(1, searchCalls);
-    }
-
-    [Fact]
-    public async Task Unwraps_Unquoted_Field_Value()
-    {
-        // Arrange — le champ renvoie une valeur brute (non encadrée de guillemets JSON).
-        var provider = CreateProvider(r => HappyPath(r, fieldBody: "the-cbp-token"));
-
-        // Act
-        var token = await provider.GetTokenAsync(CancellationToken.None);
-
-        // Assert
-        Assert.Equal("the-cbp-token", token);
-    }
-
-    [Fact]
-    public async Task Throws_When_Secret_Not_Found()
-    {
-        // Arrange — la recherche ne renvoie aucune correspondance.
-        var provider = CreateProvider(_ => Json(HttpStatusCode.OK, """{ "records": [] }"""));
-
-        // Act + Assert
-        await Assert.ThrowsAsync<InvalidOperationException>(() => provider.GetTokenAsync(CancellationToken.None));
-    }
-
-    [Fact]
-    public async Task Throws_When_Vault_Returns_Error()
-    {
-        // Arrange — le coffre refuse l'accès.
-        var provider = CreateProvider(_ => new HttpResponseMessage(HttpStatusCode.Forbidden));
-
-        // Act + Assert
-        await Assert.ThrowsAsync<InvalidOperationException>(() => provider.GetTokenAsync(CancellationToken.None));
-    }
-}
-
-//end  SecretServerCbpTokenProviderTests
-
-//
-
-//end 
 
 //
 
