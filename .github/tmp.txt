@@ -1,4 +1,46 @@
+GO
+-- Anomalies d'intégrité détectées (exposées au Back-Office via Denodo).
+IF OBJECT_ID(N'integrite.CBP_AnomalyTransaction_FACT', N'U') IS NULL
+BEGIN
+    CREATE TABLE integrite.CBP_AnomalyTransaction_FACT
+    (
+        Id                    uniqueidentifier NOT NULL CONSTRAINT PK_CBP_AnomalyTransaction_FACT PRIMARY KEY,
+        DateCreationErreur    datetimeoffset   NOT NULL,
+        IdCBPTransaction      nvarchar(100)    NULL,
+        IdFxSentryTransaction nvarchar(100)    NULL,
+        CodeErreur            int              NOT NULL,  -- 1 = CBP absente FX, 2 = FX absente CBP, 3 = champs différents
+        DescriptionErreur     nvarchar(500)    NOT NULL,
+        ChampsErreurs         nvarchar(max)    NULL       -- liste JSON des champs en écart (code 3)
+    );
 
+    CREATE INDEX IX_CBP_AnomalyTransaction_FACT_DateCreationErreur ON integrite.CBP_AnomalyTransaction_FACT (DateCreationErreur);
+    CREATE INDEX IX_CBP_AnomalyTransaction_FACT_CodeErreur         ON integrite.CBP_AnomalyTransaction_FACT (CodeErreur);
+    CREATE INDEX IX_CBP_AnomalyTransaction_FACT_IdCBPTransaction   ON integrite.CBP_AnomalyTransaction_FACT (IdCBPTransaction);
+END
+GO
+
+-- Trace d'exécution des runs (audit + supervision Control-M).
+IF OBJECT_ID(N'integrite.CBP_VerificationRun_FACT', N'U') IS NULL
+BEGIN
+    CREATE TABLE integrite.CBP_VerificationRun_FACT
+    (
+        Id                  uniqueidentifier NOT NULL CONSTRAINT PK_CBP_VerificationRun_FACT PRIMARY KEY,
+        BusinessDate        date             NOT NULL,
+        Status              nvarchar(20)     NOT NULL,  -- Running / Completed / Failed
+        StartedAt           datetimeoffset   NOT NULL,
+        CompletedAt         datetimeoffset   NULL,
+        CbpTransactionCount int              NOT NULL,
+        FxTransactionCount  int              NOT NULL,
+        AnomalyCount        int              NOT NULL,
+        FailureReason       nvarchar(1000)   NULL
+    );
+
+    CREATE INDEX IX_CBP_VerificationRun_FACT_BusinessDate ON integrite.CBP_VerificationRun_FACT (BusinessDate);
+END
+GO
+
+
+go
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
