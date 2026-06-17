@@ -1,0 +1,81 @@
+using IntegriteCBPFX.App.Common.Persistence;
+using IntegriteCBPFX.SharedKernel.Comparison;
+using IntegriteCBPFX.SharedKernel.Verification;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+
+namespace IntegriteCBPFX.App.Features.Verification;
+
+/// <summary>
+/// Câblage DI de la slice Verification. Point d'entrée unique : le host appelle
+/// <c>AddVerificationFeature(configuration)</c> et toute la slice est enregistrée.
+/// </summary>
+public static class VerificationModule
+{
+    public static IServiceCollection AddVerificationFeature(this IServiceCollection services, IConfiguration configuration)
+    {
+        // --- Options validées ---
+        services.AddOptions<CbpApiOptions>()
+            .Bind(configuration.GetSection(CbpApiOptions.SectionName))
+            .ValidateDataAnnotations();
+
+        services.AddOptions<SecretServerOptions>()
+            .Bind(configuration.GetSection(SecretServerOptions.SectionName))
+            .ValidateDataAnnotations();
+
+        // --- Moteur de vérification (SharedKernel) ---
+        services.AddSingleton<ITransactionComparer, TransactionComparer>();
+        services.AddSingleton<VerificationEngine>();
+
+        // --- Sécurité : bearer token CBP fourni par Secret Server ---
+        services.AddHttpClient(SecretServerCbpTokenProvider.HttpClientName, (sp, client) =>
+        {
+            var options = sp.GetRequiredService<IOptions<SecretServerOptions>>().Value;
+            if (options.BaseUrl is not null)
+            {
+                // Les endpoints sont appelés en relatif (secrets?…) → la base DOIT finir par « / »
+                // (sinon le dernier segment du chemin, ex. « v1 », serait écrasé). Normalisation par sûreté.
+                var baseUrl = options.BaseUrl.AbsoluteUri;
+                client.BaseAddress = baseUrl.EndsWith('/') ? options.BaseUrl : new Uri(baseUrl + "/");
+            }
+        })
+        // Authentification Windows intégrée : identité du compte exécutant le batch.
+        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseDefaultCredentials = true })
+        .AddStandardResilienceHandler(); // retry + timeout + circuit-breaker
+        services.AddSingleton<ICbpTokenProvider, SecretServerCbpTokenProvider>();
+        services.AddTransient<CbpBearerTokenHandler>();
+
+        // --- Source CBP : HttpClient typé + injection du bearer token ---
+        services.AddHttpClient<ICbpTransactionSource, CbpTransactionSource>((sp, client) =>
+        {
+            var options = sp.GetRequiredService<IOptions<CbpApiOptions>>().Value;
+            if (options.BaseUrl is not null)
+            {
+                client.BaseAddress = options.BaseUrl;
+            }
+
+            // Les timeouts sont pilotés par le pipeline de résilience (cf. ci-dessous).
+            client.Timeout = Timeout.InfiniteTimeSpan;
+        })
+        .AddHttpMessageHandler<CbpBearerTokenHandler>() // auth (en amont des retries)
+        .AddStandardResilienceHandler(resilience =>     // retry + timeout + circuit-breaker
+            resilience.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(
+                configuration.GetSection(CbpApiOptions.SectionName).GetValue("TimeoutSeconds", 100)));
+
+        // --- Accès données (Dapper) : fabrique de connexion unique (base unique) ---
+        services.AddSingleton<IAppDbConnectionFactory, FxTresorerieDbConnectionFactory>();
+
+        // --- Source FXSentry (lecture vue) + persistance des résultats (schéma integrite ; objets CBP_*_FACT créés par les DBA) ---
+        services.AddScoped<IFxSentryTransactionSource, FxSentryTransactionSource>();
+        services.AddScoped<IVerificationStore, VerificationStore>();
+
+        // --- Notification ---
+        services.AddSingleton<INotifier, Notifier>();
+
+        // --- Use-case ---
+        services.AddScoped<RunVerificationHandler>();
+
+        return services;
+    }
+}
