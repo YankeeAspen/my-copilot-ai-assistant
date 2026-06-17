@@ -1,81 +1,311 @@
-using IntegriteCBPFX.App.Common.Persistence;
-using IntegriteCBPFX.SharedKernel.Comparison;
-using IntegriteCBPFX.SharedKernel.Verification;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
+//A
+using System.ComponentModel.DataAnnotations;
+using System.Net.Http.Json;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace IntegriteCBPFX.App.Features.Verification;
 
-/// <summary>
-/// Câblage DI de la slice Verification. Point d'entrée unique : le host appelle
-/// <c>AddVerificationFeature(configuration)</c> et toute la slice est enregistrée.
-/// </summary>
-public static class VerificationModule
+/// <summary>Options d'accès au coffre Secret Server (section « SecretServer »).</summary>
+public sealed class SecretServerOptions
 {
-    public static IServiceCollection AddVerificationFeature(this IServiceCollection services, IConfiguration configuration)
+    public const string SectionName = "SecretServer";
+
+    /// <summary>
+    /// URL de base **complète** de l'API Secret Server, terminée par « / » — elle inclut le
+    /// chemin de l'API sous authentification Windows intégrée
+    /// (ex. <c>https://secretserver.example.local/winauthwebservices/api/v1/</c>).
+    /// Les endpoints sont appelés en relatif (<c>secrets?…</c>, <c>secrets/{id}/fields/{slug}</c>).
+    /// </summary>
+    [Required]
+    public Uri? BaseUrl { get; set; }
+
+    /// <summary>Nom du secret contenant le bearer token CBP (recherché par nom).</summary>
+    [Required]
+    public string? SecretName { get; set; }
+
+    /// <summary>
+    /// Slug du champ du secret portant le token. Secret basé sur le template
+    /// « Generic API Key » → champ « API Key », slug <c>apiKey</c>.
+    /// </summary>
+    public string TokenFieldSlug { get; set; } = "apiKey";
+}
+
+/// <summary>
+/// Fournit le bearer token d'appel à l'API CBP. L'origine (Secret Server) reste
+/// un détail d'infrastructure, masqué à l'adapter CBP.
+/// </summary>
+public interface ICbpTokenProvider
+{
+    Task<string> GetTokenAsync(CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Récupère le bearer token CBP depuis le Secret Server (API REST Delinea) et le
+/// conserve (cache) pour la durée du run, en **Authentification Windows Intégrée** :
+/// l'identité du compte qui exécute le batch (compte de service Control-M) authentifie
+/// les requêtes — aucun username/password. L'URL de base complète de l'API (incl. le chemin
+/// d'auth Windows intégrée) vient de la config <c>SecretServer:BaseUrl</c> ; les endpoints sont
+/// appelés en relatif. L'envoi des credentials Windows est configuré sur le HttpClient
+/// « SecretServer » (cf. <c>VerificationModule</c> : <c>UseDefaultCredentials = true</c>).
+///   1. recherche du secret par NOM → résolution de son id ;
+///   2. lecture du champ <c>TokenFieldSlug</c> (valeur en Base64 → décodée en UTF-8).
+/// </summary>
+public sealed class SecretServerCbpTokenProvider : ICbpTokenProvider
+{
+    public const string HttpClientName = "SecretServer";
+
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly SecretServerOptions _options;
+    private readonly ILogger<SecretServerCbpTokenProvider> _logger;
+
+    // Lazy<Task<...>> : le token n'est récupéré qu'une fois, de façon thread-safe.
+    private readonly Lazy<Task<string>> _token;
+
+    public SecretServerCbpTokenProvider(
+        IHttpClientFactory httpClientFactory,
+        IOptions<SecretServerOptions> options,
+        ILogger<SecretServerCbpTokenProvider> logger)
     {
-        // --- Options validées ---
-        services.AddOptions<CbpApiOptions>()
-            .Bind(configuration.GetSection(CbpApiOptions.SectionName))
-            .ValidateDataAnnotations();
+        _httpClientFactory = httpClientFactory;
+        _options = options.Value;
+        _logger = logger;
+        _token = new Lazy<Task<string>>(FetchTokenAsync);
+    }
 
-        services.AddOptions<SecretServerOptions>()
-            .Bind(configuration.GetSection(SecretServerOptions.SectionName))
-            .ValidateDataAnnotations();
+    public Task<string> GetTokenAsync(CancellationToken cancellationToken) => _token.Value;
 
-        // --- Moteur de vérification (SharedKernel) ---
-        services.AddSingleton<ITransactionComparer, TransactionComparer>();
-        services.AddSingleton<VerificationEngine>();
+    private async Task<string> FetchTokenAsync()
+    {
+        _logger.LogInformation(
+            "Récupération du bearer token CBP (secret « {SecretName} », champ {Field}) depuis Secret Server (auth Windows intégrée).",
+            _options.SecretName, _options.TokenFieldSlug);
 
-        // --- Sécurité : bearer token CBP fourni par Secret Server ---
-        services.AddHttpClient(SecretServerCbpTokenProvider.HttpClientName, (sp, client) =>
+        try
         {
-            var options = sp.GetRequiredService<IOptions<SecretServerOptions>>().Value;
-            if (options.BaseUrl is not null)
-            {
-                // Les endpoints sont appelés en relatif (secrets?…) → la base DOIT finir par « / »
-                // (sinon le dernier segment du chemin, ex. « v1 », serait écrasé). Normalisation par sûreté.
-                var baseUrl = options.BaseUrl.AbsoluteUri;
-                client.BaseAddress = baseUrl.EndsWith('/') ? options.BaseUrl : new Uri(baseUrl + "/");
-            }
-        })
-        // Authentification Windows intégrée : identité du compte exécutant le batch.
-        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseDefaultCredentials = true })
-        .AddStandardResilienceHandler(); // retry + timeout + circuit-breaker
-        services.AddSingleton<ICbpTokenProvider, SecretServerCbpTokenProvider>();
-        services.AddTransient<CbpBearerTokenHandler>();
-
-        // --- Source CBP : HttpClient typé + injection du bearer token ---
-        services.AddHttpClient<ICbpTransactionSource, CbpTransactionSource>((sp, client) =>
+            var client = _httpClientFactory.CreateClient(HttpClientName);
+            var secretId = await ResolveSecretIdAsync(client);
+            return await ReadSecretFieldAsync(client, secretId);
+        }
+        catch (HttpRequestException ex)
         {
-            var options = sp.GetRequiredService<IOptions<CbpApiOptions>>().Value;
-            if (options.BaseUrl is not null)
-            {
-                client.BaseAddress = options.BaseUrl;
-            }
+            throw new InvalidOperationException("Échec d'accès au Secret Server.", ex);
+        }
+    }
 
-            // Les timeouts sont pilotés par le pipeline de résilience (cf. ci-dessous).
-            client.Timeout = Timeout.InfiniteTimeSpan;
-        })
-        .AddHttpMessageHandler<CbpBearerTokenHandler>() // auth (en amont des retries)
-        .AddStandardResilienceHandler(resilience =>     // retry + timeout + circuit-breaker
-            resilience.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(
-                configuration.GetSection(CbpApiOptions.SectionName).GetValue("TimeoutSeconds", 100)));
+    /// <summary>Résout l'id numérique du secret à partir de son nom (recherche).</summary>
+    private async Task<int> ResolveSecretIdAsync(HttpClient client)
+    {
+        var name = _options.SecretName ?? throw new InvalidOperationException("SecretServer:SecretName non configuré.");
 
-        // --- Accès données (Dapper) : fabrique de connexion unique (base unique) ---
-        services.AddSingleton<IAppDbConnectionFactory, FxTresorerieDbConnectionFactory>();
+        using var response = await client.GetAsync($"secrets?filter.searchField=name&filter.searchText={Uri.EscapeDataString(name)}");
+        response.EnsureSuccessStatusCode();
 
-        // --- Source FXSentry (lecture vue) + persistance des résultats (schéma integrite ; objets CBP_*_FACT créés par les DBA) ---
-        services.AddScoped<IFxSentryTransactionSource, FxSentryTransactionSource>();
-        services.AddScoped<IVerificationStore, VerificationStore>();
+        var result = await response.Content.ReadFromJsonAsync<SecretSearchResponse>();
+        var match = result?.Records?.FirstOrDefault(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase));
+        return match?.Id
+            ?? throw new InvalidOperationException($"Secret « {name} » introuvable dans Secret Server.");
+    }
 
-        // --- Notification ---
-        services.AddSingleton<INotifier, Notifier>();
+    private async Task<string> ReadSecretFieldAsync(HttpClient client, int secretId)
+    {
+        using var response = await client.GetAsync($"secrets/{secretId}/fields/{_options.TokenFieldSlug}");
+        response.EnsureSuccessStatusCode();
 
-        // --- Use-case ---
-        services.AddScoped<RunVerificationHandler>();
+        // L'endpoint renvoie la valeur du champ, généralement encodée en chaîne JSON.
+        var raw = (await response.Content.ReadAsStringAsync()).Trim();
+        var base64 = raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"'
+            ? JsonSerializer.Deserialize<string>(raw) ?? raw
+            : raw;
 
-        return services;
+        // Le token est stocké en Base64 dans le coffre → décodage en UTF-8.
+        try
+        {
+            return Encoding.UTF8.GetString(Convert.FromBase64String(base64));
+        }
+        catch (FormatException ex)
+        {
+            throw new InvalidOperationException("La valeur du champ Secret Server n'est pas un Base64 valide.", ex);
+        }
+    }
+
+    private sealed class SecretSearchResponse
+    {
+        [JsonPropertyName("records")]
+        public List<SecretSummary>? Records { get; set; }
+    }
+
+    private sealed class SecretSummary
+    {
+        [JsonPropertyName("id")]
+        public int Id { get; set; }
+
+        [JsonPropertyName("name")]
+        public string? Name { get; set; }
     }
 }
+
+
+
+//B
+
+
+
+using System.Net;
+using System.Text;
+using IntegriteCBPFX.App.Features.Verification;
+using IntegriteCBPFX.Tests.TestSupport;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests.Features.Verification;
+
+public sealed class SecretServerCbpTokenProviderTests
+{
+    private static SecretServerCbpTokenProvider CreateProvider(Func<HttpRequestMessage, HttpResponseMessage> responder)
+    {
+        var apiBase = new Uri("https://vault.local/winauthwebservices/api/v1/");
+        var factory = new StubHttpClientFactory(new RoutingHttpMessageHandler(responder), apiBase);
+        var options = Options.Create(new SecretServerOptions
+        {
+            BaseUrl = apiBase,
+            SecretName = "CBP-API-BearerToken",
+            TokenFieldSlug = "apiKey",
+        });
+        return new SecretServerCbpTokenProvider(factory, options, NullLogger<SecretServerCbpTokenProvider>.Instance);
+    }
+
+    private static HttpResponseMessage Json(HttpStatusCode code, string body) =>
+        new(code) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+
+    private const string ExpectedToken = "the-cbp-token";
+
+    private static string Base64(string text) => Convert.ToBase64String(Encoding.UTF8.GetBytes(text));
+
+    // Routeur « happy path » : recherche par nom (IWA) -> lecture du champ (valeur en Base64).
+    private static HttpResponseMessage HappyPath(HttpRequestMessage request, string? fieldBody = null)
+    {
+        var path = request.RequestUri!.AbsolutePath;
+        if (path.Contains("/fields/", StringComparison.Ordinal))
+        {
+            // Par défaut : token encodé en Base64, encadré en chaîne JSON.
+            return Json(HttpStatusCode.OK, fieldBody ?? $"\"{Base64(ExpectedToken)}\"");
+        }
+
+        if (path.EndsWith("/secrets", StringComparison.Ordinal))
+        {
+            return Json(HttpStatusCode.OK, """{ "records": [ { "id": 42, "name": "CBP-API-BearerToken" } ] }""");
+        }
+
+        return new HttpResponseMessage(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task Returns_Token_From_Vault()
+    {
+        // Arrange
+        var provider = CreateProvider(r => HappyPath(r));
+
+        // Act
+        var token = await provider.GetTokenAsync(CancellationToken.None);
+
+        // Assert
+        Assert.Equal("the-cbp-token", token);
+    }
+
+    [Fact]
+    public async Task Resolves_Secret_By_Name_Then_Reads_Field_By_Id_Via_WinAuth()
+    {
+        // Arrange — on capture les chemins appelés.
+        var paths = new List<string>();
+        var provider = CreateProvider(r =>
+        {
+            paths.Add(r.RequestUri!.PathAndQuery);
+            return HappyPath(r);
+        });
+
+        // Act
+        await provider.GetTokenAsync(CancellationToken.None);
+
+        // Assert
+        Assert.Contains(paths, p => p.StartsWith("/winauthwebservices/api/v1/secrets?", StringComparison.Ordinal) && p.Contains("CBP-API-BearerToken", StringComparison.Ordinal));
+        Assert.Contains("/winauthwebservices/api/v1/secrets/42/fields/apiKey", paths);
+    }
+
+    [Fact]
+    public async Task Caches_Token_Across_Calls()
+    {
+        // Arrange — on compte les appels de recherche.
+        var searchCalls = 0;
+        var provider = CreateProvider(r =>
+        {
+            if (r.RequestUri!.AbsolutePath.EndsWith("/secrets", StringComparison.Ordinal))
+            {
+                searchCalls++;
+            }
+
+            return HappyPath(r);
+        });
+
+        // Act — deux récupérations consécutives.
+        await provider.GetTokenAsync(CancellationToken.None);
+        await provider.GetTokenAsync(CancellationToken.None);
+
+        // Assert — le coffre n'est interrogé qu'une fois (token mis en cache).
+        Assert.Equal(1, searchCalls);
+    }
+
+    [Fact]
+    public async Task Decodes_Base64_From_Unquoted_Field()
+    {
+        // Arrange — le champ renvoie le Base64 brut (non encadré de guillemets JSON).
+        var provider = CreateProvider(r => HappyPath(r, fieldBody: Base64("the-cbp-token")));
+
+        // Act
+        var token = await provider.GetTokenAsync(CancellationToken.None);
+
+        // Assert
+        Assert.Equal("the-cbp-token", token);
+    }
+
+    [Fact]
+    public async Task Throws_When_Field_Is_Not_Valid_Base64()
+    {
+        // Arrange — la valeur du champ n'est pas du Base64 valide.
+        var provider = CreateProvider(r => HappyPath(r, fieldBody: "\"@@@not-base64@@@\""));
+
+        // Act + Assert
+        await Assert.ThrowsAsync<InvalidOperationException>(() => provider.GetTokenAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Throws_When_Secret_Not_Found()
+    {
+        // Arrange — la recherche ne renvoie aucune correspondance.
+        var provider = CreateProvider(_ => Json(HttpStatusCode.OK, """{ "records": [] }"""));
+
+        // Act + Assert
+        await Assert.ThrowsAsync<InvalidOperationException>(() => provider.GetTokenAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Throws_When_Vault_Returns_Error()
+    {
+        // Arrange — le coffre refuse l'accès.
+        var provider = CreateProvider(_ => new HttpResponseMessage(HttpStatusCode.Forbidden));
+
+        // Act + Assert
+        await Assert.ThrowsAsync<InvalidOperationException>(() => provider.GetTokenAsync(CancellationToken.None));
+    }
+}
+
+
+
+
+
+
+//B
