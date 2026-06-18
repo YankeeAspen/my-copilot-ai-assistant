@@ -1,0 +1,216 @@
+using IntegriteCBPFX.App.Features.Verification;
+using IntegriteCBPFX.SharedKernel.Anomalies;
+using IntegriteCBPFX.SharedKernel.Comparison;
+using IntegriteCBPFX.SharedKernel.Transactions;
+using IntegriteCBPFX.SharedKernel.Verification;
+using IntegriteCBPFX.Tests.TestSupport;
+using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests.Features.Verification;
+
+public sealed class RunVerificationHandlerTests
+{
+    private readonly ICbpTransactionSource _cbpSource = Substitute.For<ICbpTransactionSource>();
+    private readonly IFxSentryTransactionSource _fxSource = Substitute.For<IFxSentryTransactionSource>();
+    private readonly IVerificationStore _store = Substitute.For<IVerificationStore>();
+    private readonly IRetrievedTransactionStore _retrievedStore = Substitute.For<IRetrievedTransactionStore>();
+    private readonly INotifier _notifier = Substitute.For<INotifier>();
+    // Current (UTC) pilote « J » par défaut ; CurrentAuditTime (distinct, local) pilote l'audit.
+    private readonly FixedClock _clock = new(
+        new DateTimeOffset(2026, 5, 4, 8, 0, 0, TimeSpan.Zero),
+        auditTime: new DateTimeOffset(2026, 7, 20, 14, 30, 0, TimeSpan.FromHours(2)));
+
+    public RunVerificationHandlerTests()
+        // Par défaut : aucune transaction déjà récupérée (le filtre FinJourneeCourante ne retire rien).
+        => _retrievedStore.GetRetrievedKeysAsync(Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
+            .Returns(new HashSet<string>());
+
+    private RunVerificationHandler CreateHandler() => new(
+        _cbpSource,
+        _fxSource,
+        new VerificationEngine(new TransactionComparer()),
+        _store,
+        _retrievedStore,
+        _notifier,
+        _clock,
+        NullLogger<RunVerificationHandler>.Instance);
+
+    private void GivenSources(IReadOnlyCollection<CbpTransaction> cbp, IReadOnlyCollection<FxSentryTransaction> fx)
+    {
+        _cbpSource.GetTransactionsAsync(Arg.Any<VerificationDateRange>(), Arg.Any<CancellationToken>()).Returns(cbp);
+        _fxSource.GetTransactionsAsync(Arg.Any<VerificationDateRange>(), Arg.Any<CancellationToken>()).Returns(fx);
+    }
+
+    [Theory]
+    [InlineData(VerificationMode.Veille, "2026-04-29", "2026-05-04")]
+    [InlineData(VerificationMode.JourneeCourante, "2026-05-04", "2026-05-04")]
+    [InlineData(VerificationMode.FinJourneeCourante, "2026-05-04", "2026-05-04")]
+    public void ResolveRange_Maps_Mode_To_Trade_Date_Range(VerificationMode mode, string from, string to)
+    {
+        // Arrange
+        var today = new DateOnly(2026, 5, 4);
+
+        // Act
+        var range = RunVerificationHandler.ResolveRange(mode, today);
+
+        // Assert
+        Assert.Equal(DateOnly.Parse(from), range.FromTradeDate);
+        Assert.Equal(DateOnly.Parse(to), range.ToTradeDate);
+    }
+
+    [Fact]
+    public void ResolveRange_Throws_On_Unknown_Mode()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => RunVerificationHandler.ResolveRange((VerificationMode)999, new DateOnly(2026, 5, 4)));
+    }
+
+    [Fact]
+    public void TopFieldsInError_Ranks_By_Frequency_Then_Name()
+    {
+        // Arrange — 'status' 3×, 'tradeRate' 1×, 'valueDate' 1× ; le code 1 est ignoré.
+        var now = new DateTimeOffset(2026, 6, 15, 22, 0, 0, TimeSpan.Zero);
+        var anomalies = new[]
+        {
+            AnomalyTransaction.FieldDifferences("c1", "f1", ["status", "tradeRate"], now),
+            AnomalyTransaction.FieldDifferences("c2", "f2", ["status", "valueDate"], now),
+            AnomalyTransaction.FieldDifferences("c3", "f3", ["status"], now),
+            AnomalyTransaction.CbpNotInFxSentry("c4", now),
+        };
+
+        // Act
+        var top = RunVerificationHandler.TopFieldsInError(anomalies);
+
+        // Assert — compte décroissant, puis nom (égalité tradeRate/valueDate → ordre alphabétique).
+        Assert.Equal(["status=3", "tradeRate=1", "valueDate=1"], top);
+    }
+
+    [Fact]
+    public void TopFieldsInError_Empty_When_No_Field_Difference()
+    {
+        var now = new DateTimeOffset(2026, 6, 15, 22, 0, 0, TimeSpan.Zero);
+
+        var top = RunVerificationHandler.TopFieldsInError([AnomalyTransaction.CbpNotInFxSentry("c1", now)]);
+
+        Assert.Empty(top);
+    }
+
+    [Fact]
+    public async Task Uses_Current_For_Range_But_CurrentAuditTime_For_Audit()
+    {
+        // Arrange — Current = 2026-05-04 (UTC), CurrentAuditTime = 2026-07-20 (distinct).
+        GivenSources([], []);
+
+        // Act — JourneeCourante => plage = jour de Current.
+        await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.JourneeCourante), CancellationToken.None);
+
+        // Assert — plage/BusinessDate suivent Current…
+        await _cbpSource.Received(1).GetTransactionsAsync(
+            Arg.Is<VerificationDateRange>(r => r.FromTradeDate == new DateOnly(2026, 5, 4) && r.ToTradeDate == new DateOnly(2026, 5, 4)),
+            Arg.Any<CancellationToken>());
+        // …mais l'horodatage d'audit vient de CurrentAuditTime (≠ Current).
+        await _store.Received(1).SaveRunAsync(
+            Arg.Is<VerificationRun>(r => r.BusinessDate == new DateOnly(2026, 5, 4) && r.StartedAt == _clock.CurrentAuditTime),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Veille_Mode_Passes_J_Minus_5_To_J_To_Sources()
+    {
+        // Arrange
+        GivenSources([], []);
+
+        // Act
+        await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
+
+        // Assert — Veille = J-5 → J (today figé au 2026-05-04).
+        await _cbpSource.Received(1).GetTransactionsAsync(
+            Arg.Is<VerificationDateRange>(r => r.FromTradeDate == new DateOnly(2026, 4, 29) && r.ToTradeDate == new DateOnly(2026, 5, 4)),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task When_Source_Unavailable_Then_Run_Failed_And_Nothing_Persisted_Or_Notified()
+    {
+        // Arrange — la source CBP est indisponible.
+        _cbpSource.GetTransactionsAsync(Arg.Any<VerificationDateRange>(), Arg.Any<CancellationToken>())
+            .Returns<IReadOnlyCollection<CbpTransaction>>(_ => throw new TransactionSourceUnavailableException(TransactionSource.Cbp, "API down"));
+
+        // Act
+        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
+
+        // Assert
+        Assert.Equal(VerificationStatus.Failed, result.Status);
+        await _store.Received(1).SaveRunAsync(Arg.Is<VerificationRun>(r => r.Status == VerificationStatus.Failed), Arg.Any<CancellationToken>());
+        await _store.DidNotReceive().AddAnomaliesAsync(Arg.Any<IReadOnlyCollection<AnomalyTransaction>>(), Arg.Any<CancellationToken>());
+        await _notifier.DidNotReceive().NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task When_Anomalies_Then_Persisted_And_BackOffice_Notified()
+    {
+        // Arrange — CBP sans contrepartie FX => 1 anomalie (code 1).
+        GivenSources([TransactionTestData.Cbp()], []);
+
+        // Act
+        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
+
+        // Assert
+        Assert.Equal(VerificationStatus.Completed, result.Status);
+        Assert.Equal(1, result.AnomalyCount);
+        await _store.Received(1).AddAnomaliesAsync(Arg.Is<IReadOnlyCollection<AnomalyTransaction>>(a => a.Count == 1), Arg.Any<CancellationToken>());
+        await _notifier.Received(1).NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task When_No_Anomaly_Then_No_Notification()
+    {
+        // Arrange — paire concordante => 0 anomalie.
+        GivenSources([TransactionTestData.Cbp()], [TransactionTestData.Fx()]);
+
+        // Act
+        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
+
+        // Assert
+        Assert.Equal(VerificationStatus.Completed, result.Status);
+        Assert.Equal(0, result.AnomalyCount);
+        await _notifier.DidNotReceive().NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task FinJourneeCourante_Excludes_Already_Retrieved_Transactions()
+    {
+        // Arrange — CBP « T1 » sans FX (donnerait 1 anomalie), mais T1 est déjà récupéré ce jour.
+        GivenSources([TransactionTestData.Cbp()], []);
+        _retrievedStore.GetRetrievedKeysAsync(Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
+            .Returns(new HashSet<string> { "T1" });
+
+        // Act
+        var result = await CreateHandler().HandleAsync(
+            new RunVerificationCommand(VerificationMode.FinJourneeCourante), CancellationToken.None);
+
+        // Assert — T1 exclu => rien à traiter, aucune anomalie.
+        Assert.Equal(VerificationStatus.Completed, result.Status);
+        Assert.Equal(0, result.CbpTransactionCount);
+        Assert.Equal(0, result.AnomalyCount);
+    }
+
+    [Fact]
+    public async Task Records_Processed_Transaction_Keys_For_BusinessDate()
+    {
+        // Arrange — paire concordante (clé T1).
+        GivenSources([TransactionTestData.Cbp()], [TransactionTestData.Fx()]);
+
+        // Act
+        await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.JourneeCourante), CancellationToken.None);
+
+        // Assert — la clé traitée est tracée pour la BusinessDate (jour de Current), à l'heure d'audit.
+        await _retrievedStore.Received(1).RecordRetrievedAsync(
+            new DateOnly(2026, 5, 4),
+            Arg.Is<IReadOnlyCollection<string>>(keys => keys.Contains("T1")),
+            _clock.CurrentAuditTime,
+            Arg.Any<CancellationToken>());
+    }
+}
