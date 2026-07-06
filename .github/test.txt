@@ -1,0 +1,941 @@
+// FxSentryViewTransactionSource.cs
+using Dapper;
+using IntegriteCBPFX.App.Common.Persistence;
+using IntegriteCBPFX.SharedKernel.Transactions;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
+
+namespace IntegriteCBPFX.App.Features.Verification;
+
+/// <summary>Ligne brute d'une vue/table FXSentry (matérialisée par Dapper). Dates en INT yyyyMMdd.</summary>
+public sealed class FxSentryRow
+{
+    public string CustRef { get; set; } = string.Empty;
+    public string TradeNumber { get; set; } = string.Empty;
+    public int ActiveTradeStatus { get; set; }
+    public string CrossBaseCode { get; set; } = string.Empty;
+    public string CrossCurrencyCode { get; set; } = string.Empty;
+    public bool CrossFlipped { get; set; }
+    public string BuyCurrency { get; set; } = string.Empty;
+    public string SellCurrency { get; set; } = string.Empty;
+    public string SetCurrency { get; set; } = string.Empty;
+    public string? UserId { get; set; }
+    public string CustomerCode { get; set; } = string.Empty;
+    public int OriginalMaster { get; set; }
+    public string? Remark { get; set; }
+    public decimal FxRate { get; set; }
+    public decimal FxSpread { get; set; }
+    public int ValueDate { get; set; }
+    public int TradeDate { get; set; }
+    public decimal BuyAmount { get; set; }
+    public decimal SellAmount { get; set; }
+}
+
+/// <summary>
+/// Base des sources FXSentry lues via Dapper. Elle mutualise la projection (mêmes colonnes ⇒ même
+/// <see cref="FxSentryRow"/> + même <see cref="Map"/>), la plomberie de lecture et la traduction des
+/// pannes SQL en <see cref="TransactionSourceUnavailableException"/>. Chaque source concrète ne fournit
+/// que sa requête complète (<see cref="Sql"/>, construite sur <see cref="Projection"/>) et ses paramètres.
+/// </summary>
+public abstract class FxSentryViewTransactionSource(
+    IAppDbConnectionFactory connectionFactory,
+    ILogger logger) : IFxSentryTransactionSource
+{
+    // Projection CONSTANTE et PARTAGÉE : les alias DOIVENT correspondre aux propriétés de FxSentryRow
+    // (couvert par les tests de mapping). Toute source concrète compose son SQL à partir d'elle, ce qui
+    // garantit que les trois sources restent alignées sur le même modèle de ligne.
+    protected const string Projection =
+        """
+        SELECT CUST_REF AS CustRef,
+               TRADE_NUMBER AS TradeNumber,
+               ACTIVE_TRADE_STATUS AS ActiveTradeStatus,
+               CROSS_BASE_CODE AS CrossBaseCode,
+               CROSS_CURRENCY_CODE AS CrossCurrencyCode,
+               CROSS_FLIPPED AS CrossFlipped,
+               BUY_CURRENCY AS BuyCurrency,
+               SELL_CURRENCY AS SellCurrency,
+               SET_CURRENCY AS SetCurrency,
+               USER_ID AS UserId,
+               CUSTOMER_CODE AS CustomerCode,
+               ORIGINAL_MASTER AS OriginalMaster,
+               REMARK AS Remark,
+               FX_RATE AS FxRate,
+               FX_SPREAD AS FxSpread,
+               VALUE_DATE AS ValueDate,
+               TRADE_DATE AS TradeDate,
+               BUY_AMOUNT AS BuyAmount,
+               SELL_AMOUNT AS SellAmount
+        """;
+
+    /// <summary>Requête complète (projection + FROM + WHERE). Aucun élément ne doit être concaténé/interpolé
+    /// à partir d'une entrée externe : seuls les paramètres Dapper @From / @To (bornes de la fenêtre) varient.</summary>
+    protected abstract string Sql { get; }
+
+    public async Task<IReadOnlyCollection<FxSentryTransaction>> GetTransactionsAsync(VerificationDateRange range, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(range);
+
+        try
+        {
+            logger.LogDebug("Lecture source FXSentry [{From}..{To}].", range.From, range.To);
+
+            using var connection = connectionFactory.Create();
+            var rows = await connection.QueryAsync<FxSentryRow>(
+                new CommandDefinition(
+                    Sql,
+                    new { From = ToYyyymmdd(range.From), To = ToYyyymmdd(range.To) },
+                    cancellationToken: cancellationToken));
+
+            return rows.Select(Map).ToArray();
+        }
+        catch (SqlException ex)
+        {
+            throw new TransactionSourceUnavailableException(TransactionSource.FxSentry, "Base FXSentry inaccessible.", ex);
+        }
+    }
+
+    /// <summary>Projette une ligne brute vers le modèle de domaine (conversion des dates INT).</summary>
+    public static FxSentryTransaction Map(FxSentryRow row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        return new FxSentryTransaction
+        {
+            CustRef = row.CustRef,
+            TradeNumber = row.TradeNumber,
+            ActiveTradeStatus = row.ActiveTradeStatus,
+            CrossBaseCode = row.CrossBaseCode,
+            CrossCurrencyCode = row.CrossCurrencyCode,
+            CrossFlipped = row.CrossFlipped,
+            BuyCurrency = row.BuyCurrency,
+            SellCurrency = row.SellCurrency,
+            SetCurrency = row.SetCurrency,
+            UserId = row.UserId,
+            CustomerCode = row.CustomerCode,
+            OriginalMaster = row.OriginalMaster,
+            Remark = row.Remark,
+            FxRate = row.FxRate,
+            FxSpread = row.FxSpread,
+            ValueDate = FromYyyymmdd(row.ValueDate),
+            TradeDate = FromYyyymmdd(row.TradeDate),
+            BuyAmount = row.BuyAmount,
+            SellAmount = row.SellAmount,
+        };
+    }
+
+    public static int ToYyyymmdd(DateOnly date) => (date.Year * 10000) + (date.Month * 100) + date.Day;
+
+    public static DateOnly FromYyyymmdd(int value) => new(value / 10000, value / 100 % 100, value % 100);
+}
+
+// FxSentryViewTransactionSource.cs
+
+
+// FxSentryInitialLoadHistoriqueTransactionSource
+using IntegriteCBPFX.App.Common.Persistence;
+using Microsoft.Extensions.Logging;
+
+namespace IntegriteCBPFX.App.Features.Verification;
+
+/// <summary>
+/// Adapter FXSentry — validation du chargement initial, volet « Historique » : lit son objet d'initial
+/// load filtré sur la plage de TRADE_DATE [J-1 an .. J]. Projection/mapping/plomberie partagés
+/// (voir <see cref="FxSentryViewTransactionSource"/>).
+/// </summary>
+public sealed class FxSentryInitialLoadHistoriqueTransactionSource(
+    IAppDbConnectionFactory connectionFactory,
+    ILogger<FxSentryInitialLoadHistoriqueTransactionSource> logger)
+    : FxSentryViewTransactionSource(connectionFactory, logger)
+{
+    // TODO(initial-load) : nom réel de l'objet « historique » à confirmer (requête pas encore fournie).
+    // Objet DISTINCT de celui du volet EnCours.
+    private const string ViewName = "integrite.CBP_V_INTEGRITE_F_INITIAL_LOAD_HIST";
+
+    // FROM = constante (nom d'objet figé, aucune interpolation d'entrée externe) ; seule la plage varie.
+    protected override string Sql =>
+        Projection +
+        $"""
+
+        FROM {ViewName}
+        WHERE TRADE_DATE BETWEEN @From AND @To;
+        """;
+}
+
+// FxSentryInitialLoadHistoriqueTransactionSource
+
+
+// FxSentryInitialLoadEnCoursTransactionSource
+
+using IntegriteCBPFX.App.Common.Persistence;
+using Microsoft.Extensions.Logging;
+
+namespace IntegriteCBPFX.App.Features.Verification;
+
+/// <summary>
+/// Adapter FXSentry — validation du chargement initial, volet « En cours » : lit son objet d'initial load
+/// filtré sur la plage de TRADE_DATE [J .. J+10 ans]. Projection/mapping/plomberie partagés
+/// (voir <see cref="FxSentryViewTransactionSource"/>).
+/// </summary>
+public sealed class FxSentryInitialLoadEnCoursTransactionSource(
+    IAppDbConnectionFactory connectionFactory,
+    ILogger<FxSentryInitialLoadEnCoursTransactionSource> logger)
+    : FxSentryViewTransactionSource(connectionFactory, logger)
+{
+    // TODO(initial-load) : nom réel de l'objet « en cours » à confirmer (requête pas encore fournie).
+    // Objet DISTINCT de celui du volet Historique.
+    private const string ViewName = "integrite.CBP_V_INTEGRITE_F_INITIAL_LOAD_ENCOURS";
+
+    // FROM = constante (nom d'objet figé, aucune interpolation d'entrée externe) ; seule la plage varie.
+    protected override string Sql =>
+        Projection +
+        $"""
+
+        FROM {ViewName}
+        WHERE TRADE_DATE BETWEEN @From AND @To;
+        """;
+}
+
+// FxSentryInitialLoadEnCoursTransactionSource
+
+
+
+// VerificationModuleTests
+
+using IntegriteCBPFX.App.Features.Verification;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests.Features.Verification;
+
+/// <summary>Câblage DI : le mode sélectionne l'implémentation de <see cref="IFxSentryTransactionSource"/>.</summary>
+public sealed class VerificationModuleTests
+{
+    [Theory]
+    [InlineData(VerificationMode.Veille, typeof(FxSentryTransactionSource))]
+    [InlineData(VerificationMode.JourneeCourante, typeof(FxSentryTransactionSource))]
+    [InlineData(VerificationMode.FinJourneeCourante, typeof(FxSentryTransactionSource))]
+    [InlineData(VerificationMode.ChargementInitialHistorique, typeof(FxSentryInitialLoadHistoriqueTransactionSource))]
+    [InlineData(VerificationMode.ChargementInitialEnCours, typeof(FxSentryInitialLoadEnCoursTransactionSource))]
+    public void AddVerificationFeature_Selects_FxSource_By_Mode(VerificationMode mode, Type expectedImplementation)
+    {
+        // Arrange
+        var services = new ServiceCollection();
+
+        // Act
+        services.AddVerificationFeature(new ConfigurationBuilder().Build(), mode);
+
+        // Assert — une seule inscription pour le port FXSentry, pointant l'implémentation attendue.
+        var descriptor = Assert.Single(services, d => d.ServiceType == typeof(IFxSentryTransactionSource));
+        Assert.Equal(expectedImplementation, descriptor.ImplementationType);
+    }
+}
+
+// VerificationModuleTests
+
+// RunVerificationHandlerTests
+using IntegriteCBPFX.App.Features.Verification;
+using IntegriteCBPFX.SharedKernel.Anomalies;
+using IntegriteCBPFX.SharedKernel.Comparison;
+using IntegriteCBPFX.SharedKernel.Transactions;
+using IntegriteCBPFX.SharedKernel.Verification;
+using IntegriteCBPFX.Tests.TestSupport;
+using Microsoft.Extensions.Logging.Abstractions;
+using NSubstitute;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests.Features.Verification;
+
+public sealed class RunVerificationHandlerTests
+{
+    private readonly ICbpTransactionSource _cbpSource = Substitute.For<ICbpTransactionSource>();
+    private readonly IFxSentryTransactionSource _fxSource = Substitute.For<IFxSentryTransactionSource>();
+    private readonly IVerificationStore _store = Substitute.For<IVerificationStore>();
+    private readonly IRetrievedTransactionStore _retrievedStore = Substitute.For<IRetrievedTransactionStore>();
+    private readonly INotifier _notifier = Substitute.For<INotifier>();
+    // Current (UTC) pilote « J » par défaut ; CurrentAuditTime (distinct, local) pilote l'audit.
+    private readonly FixedClock _clock = new(
+        new DateTimeOffset(2026, 5, 4, 8, 0, 0, TimeSpan.Zero),
+        auditTime: new DateTimeOffset(2026, 7, 20, 14, 30, 0, TimeSpan.FromHours(2)));
+
+    public RunVerificationHandlerTests()
+        // Par défaut : aucune transaction déjà récupérée (le filtre FinJourneeCourante ne retire rien).
+        => _retrievedStore.GetRetrievedKeysAsync(Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
+            .Returns(new HashSet<string>());
+
+    private RunVerificationHandler CreateHandler() => new(
+        _cbpSource,
+        _fxSource,
+        new VerificationEngine(new TransactionComparer()),
+        _store,
+        _retrievedStore,
+        _notifier,
+        _clock,
+        NullLogger<RunVerificationHandler>.Instance);
+
+    private void GivenSources(IReadOnlyCollection<CbpTransaction> cbp, IReadOnlyCollection<FxSentryTransaction> fx)
+    {
+        _cbpSource.GetTransactionsAsync(Arg.Any<VerificationDateRange>(), Arg.Any<CancellationToken>()).Returns(cbp);
+        _fxSource.GetTransactionsAsync(Arg.Any<VerificationDateRange>(), Arg.Any<CancellationToken>()).Returns(fx);
+    }
+
+    [Theory]
+    [InlineData(VerificationMode.Veille, "2026-04-29", "2026-05-04")]
+    [InlineData(VerificationMode.JourneeCourante, "2026-05-04", "2026-05-04")]
+    [InlineData(VerificationMode.FinJourneeCourante, "2026-05-04", "2026-05-04")]
+    [InlineData(VerificationMode.ChargementInitialHistorique, "2025-05-04", "2026-05-04")]   // [J-1 an .. J]
+    [InlineData(VerificationMode.ChargementInitialEnCours, "2026-05-04", "2036-05-04")]      // [J .. J+10 ans]
+    public void ResolveRange_Maps_Mode_To_Bounded_Window(VerificationMode mode, string from, string to)
+    {
+        // Arrange
+        var today = new DateOnly(2026, 5, 4);
+
+        // Act
+        var range = RunVerificationHandler.ResolveRange(mode, today);
+
+        // Assert
+        Assert.Equal(DateOnly.Parse(from), range.From);
+        Assert.Equal(DateOnly.Parse(to), range.To);
+    }
+
+    [Fact]
+    public void ResolveRange_Throws_On_Unknown_Mode()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => RunVerificationHandler.ResolveRange((VerificationMode)999, new DateOnly(2026, 5, 4)));
+    }
+
+    [Fact]
+    public void TopFieldsInError_Ranks_By_Frequency_Then_Name()
+    {
+        // Arrange — 'status' 3×, 'tradeRate' 1×, 'valueDate' 1× ; le code 1 est ignoré.
+        var now = new DateTimeOffset(2026, 6, 15, 22, 0, 0, TimeSpan.Zero);
+        var anomalies = new[]
+        {
+            AnomalyTransaction.FieldDifferences("c1", "f1", ["status", "tradeRate"], now),
+            AnomalyTransaction.FieldDifferences("c2", "f2", ["status", "valueDate"], now),
+            AnomalyTransaction.FieldDifferences("c3", "f3", ["status"], now),
+            AnomalyTransaction.CbpNotInFxSentry("c4", now),
+        };
+
+        // Act
+        var top = RunVerificationHandler.TopFieldsInError(anomalies);
+
+        // Assert — compte décroissant, puis nom (égalité tradeRate/valueDate → ordre alphabétique).
+        Assert.Equal(["status=3", "tradeRate=1", "valueDate=1"], top);
+    }
+
+    [Fact]
+    public void TopFieldsInError_Empty_When_No_Field_Difference()
+    {
+        var now = new DateTimeOffset(2026, 6, 15, 22, 0, 0, TimeSpan.Zero);
+
+        var top = RunVerificationHandler.TopFieldsInError([AnomalyTransaction.CbpNotInFxSentry("c1", now)]);
+
+        Assert.Empty(top);
+    }
+
+    [Fact]
+    public async Task Uses_Current_For_Range_But_CurrentAuditTime_For_Audit()
+    {
+        // Arrange — Current = 2026-05-04 (UTC), CurrentAuditTime = 2026-07-20 (distinct).
+        GivenSources([], []);
+
+        // Act — JourneeCourante => plage = jour de Current.
+        await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.JourneeCourante), CancellationToken.None);
+
+        // Assert — plage/BusinessDate suivent Current…
+        await _cbpSource.Received(1).GetTransactionsAsync(
+            Arg.Is<VerificationDateRange>(r => r.From == new DateOnly(2026, 5, 4) && r.To == new DateOnly(2026, 5, 4)),
+            Arg.Any<CancellationToken>());
+        // …mais l'horodatage d'audit vient de CurrentAuditTime (≠ Current).
+        await _store.Received(1).SaveRunAsync(
+            Arg.Is<VerificationRun>(r => r.BusinessDate == new DateOnly(2026, 5, 4) && r.StartedAt == _clock.CurrentAuditTime),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Veille_Mode_Passes_J_Minus_5_To_J_To_Sources()
+    {
+        // Arrange
+        GivenSources([], []);
+
+        // Act
+        await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
+
+        // Assert — Veille = J-5 → J (today figé au 2026-05-04).
+        await _cbpSource.Received(1).GetTransactionsAsync(
+            Arg.Is<VerificationDateRange>(r => r.From == new DateOnly(2026, 4, 29) && r.To == new DateOnly(2026, 5, 4)),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task When_Source_Unavailable_Then_Run_Failed_And_Nothing_Persisted_Or_Notified()
+    {
+        // Arrange — la source CBP est indisponible.
+        _cbpSource.GetTransactionsAsync(Arg.Any<VerificationDateRange>(), Arg.Any<CancellationToken>())
+            .Returns<IReadOnlyCollection<CbpTransaction>>(_ => throw new TransactionSourceUnavailableException(TransactionSource.Cbp, "API down"));
+
+        // Act
+        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
+
+        // Assert
+        Assert.Equal(VerificationStatus.Failed, result.Status);
+        await _store.Received(1).SaveRunAsync(Arg.Is<VerificationRun>(r => r.Status == VerificationStatus.Failed), Arg.Any<CancellationToken>());
+        await _store.DidNotReceive().AddAnomaliesAsync(Arg.Any<IReadOnlyCollection<AnomalyTransaction>>(), Arg.Any<CancellationToken>());
+        await _notifier.DidNotReceive().NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task When_Anomalies_Then_Persisted_And_BackOffice_Notified()
+    {
+        // Arrange — CBP sans contrepartie FX => 1 anomalie (code 1).
+        GivenSources([TransactionTestData.Cbp()], []);
+
+        // Act
+        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
+
+        // Assert
+        Assert.Equal(VerificationStatus.Completed, result.Status);
+        Assert.Equal(1, result.AnomalyCount);
+        // L'anomalie persistée porte l'origine = nom du mode du run.
+        await _store.Received(1).AddAnomaliesAsync(
+            Arg.Is<IReadOnlyCollection<AnomalyTransaction>>(a => a.Count == 1 && a.Single().Origine == nameof(VerificationMode.Veille)),
+            Arg.Any<CancellationToken>());
+        await _notifier.Received(1).NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task When_No_Anomaly_Then_No_Notification()
+    {
+        // Arrange — paire concordante => 0 anomalie.
+        GivenSources([TransactionTestData.Cbp()], [TransactionTestData.Fx()]);
+
+        // Act
+        var result = await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.Veille), CancellationToken.None);
+
+        // Assert
+        Assert.Equal(VerificationStatus.Completed, result.Status);
+        Assert.Equal(0, result.AnomalyCount);
+        await _notifier.DidNotReceive().NotifyAsync(Arg.Any<VerificationRun>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task FinJourneeCourante_Excludes_Already_Retrieved_Transactions()
+    {
+        // Arrange — CBP « T1 » sans FX (donnerait 1 anomalie), mais T1 est déjà récupéré ce jour.
+        GivenSources([TransactionTestData.Cbp()], []);
+        _retrievedStore.GetRetrievedKeysAsync(Arg.Any<DateOnly>(), Arg.Any<CancellationToken>())
+            .Returns(new HashSet<string> { "T1" });
+
+        // Act
+        var result = await CreateHandler().HandleAsync(
+            new RunVerificationCommand(VerificationMode.FinJourneeCourante), CancellationToken.None);
+
+        // Assert — T1 exclu => rien à traiter, aucune anomalie.
+        Assert.Equal(VerificationStatus.Completed, result.Status);
+        Assert.Equal(0, result.CbpTransactionCount);
+        Assert.Equal(0, result.AnomalyCount);
+    }
+
+    [Fact]
+    public async Task Records_Processed_Transaction_Keys_For_BusinessDate()
+    {
+        // Arrange — paire concordante (clé T1).
+        GivenSources([TransactionTestData.Cbp()], [TransactionTestData.Fx()]);
+
+        // Act
+        await CreateHandler().HandleAsync(new RunVerificationCommand(VerificationMode.JourneeCourante), CancellationToken.None);
+
+        // Assert — la clé traitée est tracée pour la BusinessDate (jour de Current), à l'heure d'audit.
+        await _retrievedStore.Received(1).RecordRetrievedAsync(
+            new DateOnly(2026, 5, 4),
+            Arg.Is<IReadOnlyCollection<string>>(keys => keys.Contains("T1")),
+            _clock.CurrentAuditTime,
+            Arg.Any<CancellationToken>());
+    }
+}
+
+// RunVerificationHandlerTests
+
+
+// VerificationArgsTests.cs
+using IntegriteCBPFX.App;
+using IntegriteCBPFX.App.Features.Verification;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests;
+
+/// <summary>Analyse des arguments de ligne de commande (mode + date d'exécution optionnelle).</summary>
+public sealed class VerificationArgsTests
+{
+    [Fact]
+    public void No_Args_Defaults_To_Veille_Without_Date()
+    {
+        var cli = VerificationArgs.Parse([]);
+
+        Assert.Equal(VerificationMode.Veille, cli.Mode);
+        Assert.Null(cli.ExecutionDate);
+    }
+
+    [Theory]
+    [InlineData("JourneeCourante")]
+    [InlineData("journeecourante")]      // insensible à la casse
+    [InlineData("--mode", "JourneeCourante")]
+    [InlineData("--mode=JourneeCourante")]
+    public void Parses_Mode_Positional_Or_Named(params string[] args)
+    {
+        var cli = VerificationArgs.Parse(args);
+
+        Assert.Equal(VerificationMode.JourneeCourante, cli.Mode);
+        Assert.Null(cli.ExecutionDate);
+    }
+
+    [Theory]
+    [InlineData("20260615")]                  // positionnel
+    [InlineData("--date", "20260615")]
+    [InlineData("--date=20260615")]
+    public void Parses_Execution_Date_Positional_Or_Named(params string[] args)
+    {
+        var cli = VerificationArgs.Parse(args);
+
+        Assert.Equal(VerificationMode.Veille, cli.Mode);     // mode par défaut conservé
+        Assert.Equal(new DateOnly(2026, 6, 15), cli.ExecutionDate);
+    }
+
+    [Theory]
+    [InlineData("JourneeCourante", "20260615")]
+    [InlineData("20260615", "JourneeCourante")]              // ordre indifférent
+    [InlineData("--mode=JourneeCourante", "--date=20260615")]
+    public void Parses_Mode_And_Date_Together(params string[] args)
+    {
+        var cli = VerificationArgs.Parse(args);
+
+        Assert.Equal(VerificationMode.JourneeCourante, cli.Mode);
+        Assert.Equal(new DateOnly(2026, 6, 15), cli.ExecutionDate);
+    }
+
+    [Fact]
+    public void Parses_FinJourneeCourante_Mode()
+    {
+        Assert.Equal(VerificationMode.FinJourneeCourante, VerificationArgs.Parse(["FinJourneeCourante"]).Mode);
+    }
+
+    [Theory]
+    [InlineData("ChargementInitialHistorique", VerificationMode.ChargementInitialHistorique)]
+    [InlineData("chargementinitialencours", VerificationMode.ChargementInitialEnCours)]   // insensible à la casse
+    [InlineData("--mode=ChargementInitialEnCours", VerificationMode.ChargementInitialEnCours)]
+    public void Parses_ChargementInitial_Modes(string arg, VerificationMode expected)
+    {
+        Assert.Equal(expected, VerificationArgs.Parse([arg]).Mode);
+    }
+
+    [Fact]
+    public void Invalid_Mode_Throws_FormatException()
+    {
+        Assert.Throws<FormatException>(() => VerificationArgs.Parse(["Hier"]));
+    }
+
+    [Theory]
+    [InlineData("--date", "2026-06-15")]   // mauvais format (tirets)
+    [InlineData("--date", "20260631")]     // 31 juin inexistant
+    [InlineData("--date", "abcdefgh")]
+    public void Invalid_Date_Throws_FormatException(params string[] args)
+    {
+        Assert.Throws<FormatException>(() => VerificationArgs.Parse(args));
+    }
+}
+
+// VerificationArgsTests.cs
+
+
+
+// VerificationEngineTests.cs
+using IntegriteCBPFX.SharedKernel.Anomalies;
+using IntegriteCBPFX.SharedKernel.Comparison;
+using IntegriteCBPFX.SharedKernel.Transactions;
+using IntegriteCBPFX.SharedKernel.Verification;
+using IntegriteCBPFX.Tests.TestSupport;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests.SharedKernel;
+
+public sealed class VerificationEngineTests
+{
+    private static readonly DateTimeOffset Now = new(2026, 5, 2, 6, 0, 0, TimeSpan.Zero);
+    private readonly VerificationEngine _engine = new(new TransactionComparer());
+
+    [Fact]
+    public void Cbp_Without_Fx_Counterpart_Yields_Code1()
+    {
+        // Arrange
+        var cbp = TransactionTestData.Cbp();
+
+        // Act
+        var anomalies = _engine.Verify([cbp], [], Now);
+
+        // Assert
+        var anomaly = Assert.Single(anomalies);
+        Assert.Equal(AnomalyCode.CbpNotInFxSentry, anomaly.CodeErreur);
+        Assert.Equal("T1", anomaly.IdCBPTransaction);
+        Assert.Null(anomaly.IdFxSentryTransaction);
+    }
+
+    [Fact]
+    public void Fx_Without_Cbp_Counterpart_Yields_Code2()
+    {
+        // Arrange
+        var fx = TransactionTestData.Fx();
+
+        // Act
+        var anomalies = _engine.Verify([], [fx], Now);
+
+        // Assert
+        var anomaly = Assert.Single(anomalies);
+        Assert.Equal(AnomalyCode.FxSentryNotInCbp, anomaly.CodeErreur);
+        Assert.Equal("FX1", anomaly.IdFxSentryTransaction);
+        Assert.Null(anomaly.IdCBPTransaction);
+    }
+
+    [Fact]
+    public void Verify_Stamps_Origine_On_Anomalies()
+    {
+        // Arrange — une CBP sans contrepartie => 1 anomalie, taguée par l'origine (mode) passée.
+        var cbp = TransactionTestData.Cbp();
+
+        // Act
+        var anomalies = _engine.Verify([cbp], [], Now, "ChargementInitialHistorique");
+
+        // Assert
+        Assert.Equal("ChargementInitialHistorique", Assert.Single(anomalies).Origine);
+    }
+
+    [Fact]
+    public void Matching_Pair_Yields_No_Anomaly()
+    {
+        // Arrange
+        var cbp = TransactionTestData.Cbp();
+        var fx = TransactionTestData.Fx();
+
+        // Act
+        var anomalies = _engine.Verify([cbp], [fx], Now);
+
+        // Assert
+        Assert.Empty(anomalies);
+    }
+
+    [Fact]
+    public void Field_Differences_Yield_Code3_With_FieldList()
+    {
+        // Arrange — un champ d'en-tête diffère (status).
+        var cbp = TransactionTestData.Cbp();
+        var fx = TransactionTestData.Fx() with { ActiveTradeStatus = 0 };
+
+        // Act
+        var anomalies = _engine.Verify([cbp], [fx], Now);
+
+        // Assert
+        var anomaly = Assert.Single(anomalies);
+        Assert.Equal(AnomalyCode.FieldDifferences, anomaly.CodeErreur);
+        Assert.Equal("T1", anomaly.IdCBPTransaction);
+        Assert.Equal("FX1", anomaly.IdFxSentryTransaction);
+        Assert.NotNull(anomaly.ChampsErreurs);
+        Assert.Contains("status", anomaly.ChampsErreurs);
+    }
+
+    [Fact]
+    public void Swap_Is_Matched_To_Two_Fx_Rows_By_ValueDate()
+    {
+        // Arrange — lignes FX volontairement désordonnées : l'engine doit trier par VALUE_DATE.
+        var (cbp, near, far) = BuildMatchingSwap();
+
+        // Act
+        var anomalies = _engine.Verify([cbp], [far, near], Now);
+
+        // Assert
+        Assert.Empty(anomalies);
+    }
+
+    [Fact]
+    public void Swap_FarLeg_Difference_Is_Prefixed()
+    {
+        // Arrange — écart de taux sur la far leg.
+        var (cbp, near, far) = BuildMatchingSwap();
+        far = far with { FxRate = 1.5m };
+
+        // Act
+        var anomalies = _engine.Verify([cbp], [near, far], Now);
+
+        // Assert
+        var anomaly = Assert.Single(anomalies);
+        Assert.Equal(AnomalyCode.FieldDifferences, anomaly.CodeErreur);
+        Assert.Contains("farDateDetail.tradeRate", anomaly.ChampsErreurs!);
+    }
+
+    private static (CbpTransaction Cbp, FxSentryTransaction Near, FxSentryTransaction Far) BuildMatchingSwap()
+    {
+        var nearDate = new DateOnly(2026, 5, 1);
+        var farDate = new DateOnly(2026, 6, 1);
+
+        var near = new FxSentryTransaction
+        {
+            CustRef = "S1",
+            TradeNumber = "FXN",
+            ActiveTradeStatus = 1,
+            CrossBaseCode = "USD",
+            CrossCurrencyCode = "CAD",
+            CrossFlipped = false,
+            BuyCurrency = "CAD",
+            SellCurrency = "USD", // near = Buy => SELL == base(USD)
+            SetCurrency = "USD",
+            UserId = "u",
+            CustomerCode = "C",
+            OriginalMaster = 295,
+            Remark = "r",
+            FxRate = 1.3m,
+            FxSpread = 0.0001m,
+            ValueDate = nearDate,
+            TradeDate = nearDate,
+            BuyAmount = 1300m,  // cur2 (Buy)
+            SellAmount = 1000m, // cur1 (Buy)
+        };
+
+        var far = near with
+        {
+            TradeNumber = "FXF",
+            BuyCurrency = "USD", // far = Sell => BUY == base(USD)
+            SellCurrency = "CAD",
+            ValueDate = farDate,
+            BuyAmount = 1000m,  // cur1 (Sell)
+            SellAmount = 1300m, // cur2 (Sell)
+        };
+
+        var cbp = new CbpTransaction
+        {
+            TransId = "S1",
+            Status = "TRADE_DONE",
+            Symbol = "USDCAD",
+            TradeAction = CbpTradeAction.BuySell,
+            NotionalCurrency = "USD",
+            UserNm = "u",
+            CustomerRef = "C",
+            ChannelId = "SDP",
+            Comment = "r",
+            NearLeg = new CbpLeg(1.3m, nearDate, nearDate, 1000m, 1300m, 0.0001m),
+            FarLeg = new CbpLeg(1.3m, farDate, nearDate, 1000m, 1300m, 0.0001m),
+        };
+
+        return (cbp, near, far);
+    }
+}
+
+
+// VerificationEngineTests.cs
+
+
+// VerificationStoreTests.cs
+using Dapper;
+using IntegriteCBPFX.App.Features.Verification;
+using IntegriteCBPFX.SharedKernel.Anomalies;
+using IntegriteCBPFX.SharedKernel.Verification;
+using IntegriteCBPFX.Tests.TestSupport;
+using Microsoft.Extensions.Logging.Abstractions;
+using Xunit;
+
+namespace IntegriteCBPFX.Tests.Common.Persistence;
+
+/// <summary>
+/// Tests de persistance Dapper (VerificationStore) sur SQLite (schéma integrite) :
+/// round-trip réel via SQL, comme en SQL Server.
+/// </summary>
+public sealed class VerificationStoreTests : IDisposable
+{
+    private static readonly DateTimeOffset Now = new(2026, 5, 4, 8, 0, 0, TimeSpan.Zero);
+
+    private readonly SqliteIntegriteDatabase _db = new();
+    private readonly VerificationStore _store;
+
+    public VerificationStoreTests() => _store = new VerificationStore(_db, NullLogger<VerificationStore>.Instance);
+
+    public void Dispose() => _db.Dispose();
+
+    [Fact]
+    public async Task SaveRunAsync_Inserts_New_Run()
+    {
+        // Arrange
+        var run = VerificationRun.Start(Guid.NewGuid(), new DateOnly(2026, 5, 4), Now);
+        run.Complete(Now.AddMinutes(2), cbpCount: 10, fxCount: 12, anomalyCount: 3);
+
+        // Act
+        await _store.SaveRunAsync(run, CancellationToken.None);
+
+        // Assert
+        await using var connection = _db.Create();
+        var status = await connection.ExecuteScalarAsync<string>(
+            "SELECT Status FROM integrite.CBP_VerificationRun_FACT WHERE Id = @Id", new { run.Id });
+        var anomalyCount = await connection.ExecuteScalarAsync<long>(
+            "SELECT AnomalyCount FROM integrite.CBP_VerificationRun_FACT WHERE Id = @Id", new { run.Id });
+        Assert.Equal("Completed", status);
+        Assert.Equal(3, anomalyCount);
+    }
+
+    [Fact]
+    public async Task SaveRunAsync_Updates_Existing_Run()
+    {
+        // Arrange — run inséré une 1re fois (Running).
+        var run = VerificationRun.Start(Guid.NewGuid(), new DateOnly(2026, 5, 4), Now);
+        await _store.SaveRunAsync(run, CancellationToken.None);
+
+        // Act — run clôturé puis ré-enregistré (entité détachée → upsert via UPDATE).
+        run.Complete(Now.AddMinutes(1), cbpCount: 5, fxCount: 5, anomalyCount: 0);
+        await _store.SaveRunAsync(run, CancellationToken.None);
+
+        // Assert — une seule ligne, statut mis à jour.
+        await using var connection = _db.Create();
+        var rowCount = await connection.ExecuteScalarAsync<long>("SELECT COUNT(1) FROM integrite.CBP_VerificationRun_FACT");
+        var status = await connection.ExecuteScalarAsync<string>(
+            "SELECT Status FROM integrite.CBP_VerificationRun_FACT WHERE Id = @Id", new { run.Id });
+        Assert.Equal(1, rowCount);
+        Assert.Equal("Completed", status);
+    }
+
+    [Fact]
+    public async Task AddAnomaliesAsync_Persists_All_Codes()
+    {
+        // Arrange — une anomalie de chaque code.
+        var anomalies = new[]
+        {
+            AnomalyTransaction.CbpNotInFxSentry("T1", Now, "ChargementInitialEnCours"),
+            AnomalyTransaction.FxSentryNotInCbp("FX1", Now),
+            AnomalyTransaction.FieldDifferences("T2", "FX2", ["status", "farDateDetail.tradeRate"], Now),
+        };
+
+        // Act
+        await _store.AddAnomaliesAsync(anomalies, CancellationToken.None);
+
+        // Assert
+        await using var connection = _db.Create();
+        var total = await connection.ExecuteScalarAsync<long>("SELECT COUNT(1) FROM integrite.CBP_AnomalyTransaction_FACT");
+        var idCbpForCode1 = await connection.ExecuteScalarAsync<string>(
+            "SELECT IdCBPTransaction FROM integrite.CBP_AnomalyTransaction_FACT WHERE CodeErreur = 'CBP_ABSENTE_FX'");
+        var champsForCode3 = await connection.ExecuteScalarAsync<string>(
+            "SELECT ChampsErreurs FROM integrite.CBP_AnomalyTransaction_FACT WHERE CodeErreur = 'CHAMPS_DIFFERENTS'");
+        var origineForCode1 = await connection.ExecuteScalarAsync<string>(
+            "SELECT Origine FROM integrite.CBP_AnomalyTransaction_FACT WHERE CodeErreur = 'CBP_ABSENTE_FX'");
+        Assert.Equal(3, total);
+        Assert.Equal("T1", idCbpForCode1);
+        Assert.Contains("farDateDetail.tradeRate", champsForCode3);
+        Assert.Equal("ChargementInitialEnCours", origineForCode1);
+    }
+
+    [Fact]
+    public async Task AddAnomaliesAsync_With_Empty_Collection_Persists_Nothing()
+    {
+        // Arrange — rien à persister.
+
+        // Act
+        await _store.AddAnomaliesAsync([], CancellationToken.None);
+
+        // Assert
+        await using var connection = _db.Create();
+        var total = await connection.ExecuteScalarAsync<long>("SELECT COUNT(1) FROM integrite.CBP_AnomalyTransaction_FACT");
+        Assert.Equal(0, total);
+    }
+}
+
+// VerificationStoreTests.cs
+
+
+// SqliteIntegriteDatabase.cs
+using System.Data.Common;
+using IntegriteCBPFX.App.Common.Persistence;
+using Microsoft.Data.Sqlite;
+
+namespace IntegriteCBPFX.Tests.TestSupport;
+
+/// <summary>
+/// Base SQLite (fichiers temporaires) exposant un schéma « integrite » via ATTACH, pour
+/// tester les requêtes Dapper qualifiées <c>integrite.CBP_*</c> comme en SQL Server.
+/// Implémente <see cref="IAppDbConnectionFactory"/> : injectable dans le store.
+/// Pooling désactivé → chaque connexion ré-attache proprement et se ferme.
+/// </summary>
+public sealed class SqliteIntegriteDatabase : IAppDbConnectionFactory, IDisposable
+{
+    private readonly string _mainPath = Path.Combine(Path.GetTempPath(), $"integ_{Guid.NewGuid():N}.db");
+    private readonly string _integritePath = Path.Combine(Path.GetTempPath(), $"integrite_{Guid.NewGuid():N}.db");
+
+    public SqliteIntegriteDatabase()
+    {
+        using var connection = OpenWithIntegriteSchema();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            CREATE TABLE integrite.CBP_AnomalyTransaction_FACT (
+                Id                    TEXT    NOT NULL PRIMARY KEY,
+                DateCreationErreur    TEXT    NOT NULL,
+                IdCBPTransaction      TEXT    NULL,
+                IdFxSentryTransaction TEXT    NULL,
+                CodeErreur            TEXT    NOT NULL,
+                DescriptionErreur     TEXT    NOT NULL,
+                ChampsErreurs         TEXT    NULL,
+                Origine               TEXT    NULL
+            );
+            CREATE TABLE integrite.CBP_VerificationRun_FACT (
+                Id                  TEXT    NOT NULL PRIMARY KEY,
+                BusinessDate        TEXT    NOT NULL,
+                Status              TEXT    NOT NULL,
+                StartedAt           TEXT    NOT NULL,
+                CompletedAt         TEXT    NULL,
+                CbpTransactionCount INTEGER NOT NULL,
+                FxTransactionCount  INTEGER NOT NULL,
+                AnomalyCount        INTEGER NOT NULL,
+                FailureReason       TEXT    NULL
+            );
+            CREATE TABLE integrite.CBP_RetrievedTransaction_FACT (
+                BusinessDate   TEXT NOT NULL,
+                TransactionKey TEXT NOT NULL,
+                RetrievedAt    TEXT NOT NULL,
+                PRIMARY KEY (BusinessDate, TransactionKey)
+            );
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    public DbConnection Create() => OpenWithIntegriteSchema();
+
+    private SqliteConnection OpenWithIntegriteSchema()
+    {
+        var connection = new SqliteConnection($"Data Source={_mainPath};Pooling=False");
+        connection.Open();
+        using var attach = connection.CreateCommand();
+        attach.CommandText = $"ATTACH DATABASE '{_integritePath.Replace('\\', '/')}' AS integrite;";
+        attach.ExecuteNonQuery();
+        return connection;
+    }
+
+    public void Dispose()
+    {
+        TryDelete(_mainPath);
+        TryDelete(_integritePath);
+
+        static void TryDelete(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            catch (IOException)
+            {
+                // Fichier temporaire encore verrouillé : sans gravité pour les tests.
+            }
+        }
+    }
+}
+
+// SqliteIntegriteDatabase.cs
+
+
+// 
+// 
