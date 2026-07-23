@@ -1,0 +1,1118 @@
+================================================================================
+ WebLoginMonitor - export complet du code et des parametres
+ Genere le : 2026-07-23 17:13:54
+ Commentaires retires des fichiers source (.cs).
+ 15 fichiers inclus.
+================================================================================
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/appsettings.json
+################################################################################
+
+{
+  "Monitor": {
+    "Browser": "edge",
+    "Headless": true,
+    "SlowMoMs": 0,
+    "DefaultTimeoutMs": 15000,
+    "FailOnHttpError": true,
+    "FailOnBlankPage": true,
+    "ScreenshotOnFailure": true,
+    "ArtifactsDirectory": "artifacts",
+    "MaxParallelism": 1,
+    "SitesFile": "sites.json",
+    "Email": {
+      "Enabled": false,
+      "OnlyOnFailure": true,
+      "SmtpHost": "smtp.example.com",
+      "SmtpPort": 587,
+      "UseStartTls": true,
+      "Username": "${SMTP_USER}",
+      "Password": "${SMTP_PASSWORD}",
+      "From": "monitoring@example.com",
+      "To": [
+        "equipe-support@example.com"
+      ],
+      "SubjectPrefix": "[WebLoginMonitor]"
+    }
+  },
+  "NLog": {
+    "throwConfigExceptions": true,
+    "internalLogLevel": "Warn",
+    "internalLogFile": "${basedir}/logs/nlog-internal.log",
+    "targets": {
+      "console": {
+        "type": "ColoredConsole",
+        "layout": "${time} ${level:uppercase=true:padding=-5} ${message} ${exception:format=Message}",
+        "rowHighlightingRules": [
+          { "condition": "level == LogLevel.Error", "foregroundColor": "Red" },
+          { "condition": "level == LogLevel.Warn", "foregroundColor": "Yellow" },
+          { "condition": "level == LogLevel.Info", "foregroundColor": "Gray" }
+        ]
+      },
+      "file": {
+        "type": "File",
+        "fileName": "${basedir}/logs/monitor-${shortdate}.log",
+        "layout": "${longdate} | ${level:uppercase=true:padding=-5} | ${logger:shortName=true} | ${message} ${onexception:| ${exception:format=ToString}}",
+        "keepFileOpen": false,
+        "encoding": "utf-8",
+        "archiveEvery": "Day",
+        "maxArchiveFiles": 30
+      },
+      "results": {
+        "type": "File",
+        "fileName": "${basedir}/logs/results-${shortdate}.log",
+        "layout": "${longdate} | ${message}",
+        "keepFileOpen": false,
+        "encoding": "utf-8"
+      }
+    },
+    "rules": [
+      { "logger": "Results", "minLevel": "Info", "writeTo": "results" },
+      { "logger": "*", "minLevel": "Info", "writeTo": "console" },
+      { "logger": "*", "minLevel": "Debug", "writeTo": "file" }
+    ]
+  }
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/sites.json
+################################################################################
+
+{
+  "sites": [
+    {
+      "name": "Exemple - Login simple (site public de test)",
+      "description": "Scénario réel contre the-internet.herokuapp.com. Sert de smoke test.",
+      "enabled": true,
+      "defaultTimeoutMs": 15000,
+      "steps": [
+        {
+          "type": "Goto",
+          "description": "Ouvre la page de connexion",
+          "url": "https://the-internet.herokuapp.com/login"
+        },
+        {
+          "type": "Fill",
+          "description": "Saisit l'identifiant",
+          "selector": "#username",
+          "value": "tomsmith"
+        },
+        {
+          "type": "Fill",
+          "description": "Saisit le mot de passe",
+          "selector": "#password",
+          "value": "SuperSecretPassword!"
+        },
+        {
+          "type": "Click",
+          "description": "Clique sur Se connecter",
+          "selector": "button[type=submit]"
+        },
+        {
+          "type": "ExpectVisible",
+          "description": "Vérifie l'accès à l'espace sécurisé",
+          "selector": ".flash.success"
+        },
+        {
+          "type": "ExpectText",
+          "description": "Vérifie le message de bienvenue",
+          "selector": "#flash",
+          "text": "You logged into a secure area!"
+        }
+      ]
+    },
+    {
+      "name": "Exemple - Connexion + SSO vers un 2e espace",
+      "description": "Modèle pour un login suivi d'un clic ouvrant un second espace via SSO. Désactivé : à adapter à ton application réelle.",
+      "enabled": false,
+      "defaultTimeoutMs": 20000,
+      "steps": [
+        {
+          "type": "Goto",
+          "description": "Ouvre le portail principal",
+          "url": "https://portail.exemple.local/login"
+        },
+        {
+          "type": "Click",
+          "description": "Ferme le bandeau cookies si présent",
+          "selector": "#accept-cookies",
+          "optional": true
+        },
+        {
+          "type": "Fill",
+          "description": "Identifiant (depuis variable d'environnement)",
+          "selector": "#user",
+          "value": "${PORTAIL_USER}"
+        },
+        {
+          "type": "Fill",
+          "description": "Mot de passe (depuis variable d'environnement)",
+          "selector": "#pass",
+          "value": "${PORTAIL_PASSWORD}"
+        },
+        {
+          "type": "Click",
+          "description": "Valide la connexion",
+          "selector": "#btn-login"
+        },
+        {
+          "type": "WaitForSelector",
+          "description": "Attend le tableau de bord principal",
+          "selector": ".dashboard-home"
+        },
+        {
+          "type": "Click",
+          "description": "Ouvre le second espace via SSO",
+          "selector": "text=Accéder à l'espace RH"
+        },
+        {
+          "type": "WaitForUrl",
+          "description": "Attend la redirection SSO vers l'espace RH",
+          "url": "**/rh/**"
+        },
+        {
+          "type": "ExpectVisible",
+          "description": "Vérifie que l'espace RH est bien chargé",
+          "selector": "#rh-accueil"
+        }
+      ]
+    },
+    {
+      "name": "Exemple - Connexion avec 3e champ + listes déroulantes",
+      "description": "Modèle : champ supplémentaire, <select> natif et combo box 'custom'. Désactivé.",
+      "enabled": false,
+      "steps": [
+        {
+          "type": "Goto",
+          "description": "Ouvre la page de connexion",
+          "url": "https://app.exemple.local/login"
+        },
+        {
+          "type": "Fill",
+          "description": "Identifiant",
+          "selector": "#user",
+          "value": "${APP_USER}"
+        },
+        {
+          "type": "Fill",
+          "description": "Mot de passe",
+          "selector": "#pass",
+          "value": "${APP_PASSWORD}"
+        },
+        {
+          "type": "Fill",
+          "description": "3e champ texte (ex. code client / domaine)",
+          "selector": "#code-client",
+          "value": "KYRIA"
+        },
+        {
+          "type": "SelectOption",
+          "description": "Liste déroulante HTML native — choix par TEXTE visible",
+          "selector": "#agence",
+          "value": "Agence de Paris",
+          "selectBy": "Label"
+        },
+        {
+          "type": "Click",
+          "description": "Combo box custom (non-<select>) : ouvre la liste",
+          "selector": "#profil-combo"
+        },
+        {
+          "type": "Click",
+          "description": "Combo box custom : choisit l'élément dans la liste ouverte",
+          "selector": "li[role=option]:has-text('Administrateur')"
+        },
+        {
+          "type": "Click",
+          "description": "Valide la connexion",
+          "selector": "#btn-login"
+        },
+        {
+          "type": "ExpectVisible",
+          "description": "Vérifie l'accès à l'espace",
+          "selector": "#accueil"
+        }
+      ]
+    }
+  ]
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Program.cs
+################################################################################
+
+using Microsoft.Playwright;
+using NLog;
+using NLog.Extensions.Logging;
+using WebLoginMonitor.Services;
+
+var baseDir = AppContext.BaseDirectory;
+
+if (args.Contains("--install"))
+{
+    return Microsoft.Playwright.Program.Main(["install", "chromium"]);
+}
+
+var configuration = ConfigLoader.BuildConfiguration(baseDir);
+LogManager.Configuration = new NLogLoggingConfiguration(configuration.GetSection("NLog"));
+var log = LogManager.GetCurrentClassLogger();
+
+int exitCode = 0;
+try
+{
+    var options = ConfigLoader.LoadOptions(configuration, baseDir);
+    var sites = ConfigLoader.LoadSites(options.SitesFile);
+
+    var onlyArg = args.FirstOrDefault(a => a.StartsWith("--only=", StringComparison.OrdinalIgnoreCase));
+    var only = onlyArg?["--only=".Length..];
+
+    var active = sites
+        .Where(s => s.Enabled)
+        .Where(s => only is null || s.Name.Contains(only, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    if (active.Count == 0)
+    {
+        log.Warn("Aucun site actif à tester (vérifiez 'enabled' dans {File}).", options.SitesFile);
+        return 0;
+    }
+
+    log.Info("=== WebLoginMonitor — {Count} site(s) — {Browser} (headless={Headless}) ===",
+        active.Count, options.Browser, options.Headless);
+
+    using var playwright = await Playwright.CreateAsync();
+    var launchOptions = new BrowserTypeLaunchOptions
+    {
+        Headless = options.Headless,
+        SlowMo = options.SlowMoMs
+    };
+
+    IBrowserType browserType;
+    switch (options.Browser.ToLowerInvariant())
+    {
+        case "firefox": browserType = playwright.Firefox; break;
+        case "webkit": browserType = playwright.Webkit; break;
+        case "edge" or "msedge": browserType = playwright.Chromium; launchOptions.Channel = "msedge"; break;
+        case "chrome": browserType = playwright.Chromium; launchOptions.Channel = "chrome"; break;
+        default: browserType = playwright.Chromium; break;
+    }
+
+    IBrowser browser;
+    try
+    {
+        browser = await browserType.LaunchAsync(launchOptions);
+    }
+    catch (PlaywrightException ex) when (
+        ex.Message.Contains("Executable doesn't exist", StringComparison.OrdinalIgnoreCase) ||
+        ex.Message.Contains("is not found", StringComparison.OrdinalIgnoreCase))
+    {
+        log.Fatal("Navigateur '{Browser}' introuvable. Chromium/Firefox/WebKit : `dotnet run --project src/WebLoginMonitor -- --install`. " +
+                  "Edge/Chrome : vérifiez qu'il est installé sur la machine.", options.Browser);
+        log.Debug(ex, "Détail");
+        return 2;
+    }
+
+    var runner = new SiteRunner(browser, options);
+    var gate = new SemaphoreSlim(Math.Max(1, options.MaxParallelism));
+
+    var tasks = active.Select(async site =>
+    {
+        await gate.WaitAsync();
+        try { return await runner.RunAsync(site); }
+        finally { gate.Release(); }
+    });
+
+    var results = await Task.WhenAll(tasks);
+    await browser.CloseAsync();
+
+    var failures = results.Count(r => !r.Success);
+    log.Info("=== Terminé : {Ok}/{Total} OK, {Fail} échec(s) ===",
+        results.Length - failures, results.Length, failures);
+
+    var notifier = new NotificationService(options.Email);
+    await notifier.SendIfNeededAsync(results);
+
+    exitCode = failures == 0 ? 0 : 1;
+}
+catch (Exception ex)
+{
+    log.Fatal(ex, "Erreur fatale du monitoring.");
+    exitCode = 3;
+}
+finally
+{
+    LogManager.Shutdown();
+}
+
+return exitCode;
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Models/StepType.cs
+################################################################################
+
+namespace WebLoginMonitor.Models;
+
+public enum StepType
+{
+
+    Goto,
+
+    Fill,
+
+    Click,
+
+    Press,
+
+    SelectOption,
+
+    WaitForSelector,
+
+    WaitForUrl,
+
+    WaitForTimeout,
+
+    ExpectVisible,
+
+    ExpectText,
+
+    ExpectUrl,
+
+    ExpectNotBlank
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Models/SelectBy.cs
+################################################################################
+
+namespace WebLoginMonitor.Models;
+
+public enum SelectBy
+{
+
+    Value,
+
+    Label,
+
+    Index
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Models/LoginStep.cs
+################################################################################
+
+using System.Text.Json.Serialization;
+
+namespace WebLoginMonitor.Models;
+
+public sealed class LoginStep
+{
+
+    public StepType Type { get; set; }
+
+    public string? Description { get; set; }
+
+    public string? Selector { get; set; }
+
+    public string? Value { get; set; }
+
+    public string? Url { get; set; }
+
+    public string? Text { get; set; }
+
+    public SelectBy? SelectBy { get; set; }
+
+    public int? TimeoutMs { get; set; }
+
+    public bool Optional { get; set; }
+
+    [JsonIgnore]
+    public bool IsSecret => Type is StepType.Fill && (Selector?.Contains("pass", StringComparison.OrdinalIgnoreCase) == true);
+
+    public override string ToString()
+    {
+        var label = string.IsNullOrWhiteSpace(Description) ? Type.ToString() : $"{Type} — {Description}";
+        return label;
+    }
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Models/SiteDefinition.cs
+################################################################################
+
+namespace WebLoginMonitor.Models;
+
+public sealed class SiteDefinition
+{
+
+    public string Name { get; set; } = string.Empty;
+
+    public string? Description { get; set; }
+
+    public bool Enabled { get; set; } = true;
+
+    public int? DefaultTimeoutMs { get; set; }
+
+    public List<LoginStep> Steps { get; set; } = new();
+}
+
+public sealed class SitesFile
+{
+    public List<SiteDefinition> Sites { get; set; } = new();
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Models/SiteResult.cs
+################################################################################
+
+namespace WebLoginMonitor.Models;
+
+public sealed class SiteResult
+{
+    public string SiteName { get; set; } = string.Empty;
+
+    public bool Success { get; set; }
+
+    public DateTime StartedAtUtc { get; set; }
+
+    public TimeSpan Duration { get; set; }
+
+    public int StepsCompleted { get; set; }
+
+    public int StepsTotal { get; set; }
+
+    public int? FailedStepIndex { get; set; }
+
+    public string? FailedStep { get; set; }
+
+    public string? ErrorMessage { get; set; }
+
+    public string? ScreenshotPath { get; set; }
+
+    public string StatusLabel => Success ? "OK" : "ÉCHEC";
+
+    public string FailureLocation =>
+        FailedStepIndex.HasValue
+            ? $"étape #{FailedStepIndex + 1} : {FailedStep}"
+            : FailedStep ?? "(initialisation)";
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Models/MonitorOptions.cs
+################################################################################
+
+namespace WebLoginMonitor.Models;
+
+public sealed class MonitorOptions
+{
+
+    public string Browser { get; set; } = "edge";
+
+    public bool Headless { get; set; } = true;
+
+    public int SlowMoMs { get; set; }
+
+    public int DefaultTimeoutMs { get; set; } = 15000;
+
+    public bool FailOnHttpError { get; set; } = true;
+
+    public bool FailOnBlankPage { get; set; } = true;
+
+    public bool ScreenshotOnFailure { get; set; } = true;
+
+    public string ArtifactsDirectory { get; set; } = "artifacts";
+
+    public int MaxParallelism { get; set; } = 1;
+
+    public string SitesFile { get; set; } = "sites.json";
+
+    public EmailOptions Email { get; set; } = new();
+}
+
+public sealed class EmailOptions
+{
+
+    public bool Enabled { get; set; }
+
+    public bool OnlyOnFailure { get; set; } = true;
+
+    public string SmtpHost { get; set; } = string.Empty;
+    public int SmtpPort { get; set; } = 587;
+
+    public bool UseStartTls { get; set; } = true;
+
+    public string Username { get; set; } = string.Empty;
+
+    public string Password { get; set; } = string.Empty;
+
+    public string From { get; set; } = string.Empty;
+
+    public List<string> To { get; set; } = new();
+
+    public string SubjectPrefix { get; set; } = "[WebLoginMonitor]";
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Services/SecretResolver.cs
+################################################################################
+
+using System.Text.RegularExpressions;
+
+namespace WebLoginMonitor.Services;
+
+public static partial class SecretResolver
+{
+    [GeneratedRegex(@"\$\{(?<name>[A-Za-z_][A-Za-z0-9_]*)\}", RegexOptions.Compiled)]
+    private static partial Regex TokenRegex();
+
+    public static string? Resolve(string? input)
+    {
+        if (string.IsNullOrEmpty(input))
+            return input;
+
+        return TokenRegex().Replace(input, match =>
+        {
+            var name = match.Groups["name"].Value;
+            var value = Environment.GetEnvironmentVariable(name);
+            if (value is null)
+            {
+                throw new InvalidOperationException(
+                    $"Variable d'environnement '{name}' introuvable (référencée via ${{{name}}}). " +
+                    "Définissez-la avant l'exécution.");
+            }
+            return value;
+        });
+    }
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Services/ConfigLoader.cs
+################################################################################
+
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Extensions.Configuration;
+using WebLoginMonitor.Models;
+
+namespace WebLoginMonitor.Services;
+
+public static class ConfigLoader
+{
+    private static readonly JsonSerializerOptions SitesJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        ReadCommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true,
+        Converters = { new JsonStringEnumConverter() }
+    };
+
+    public static IConfigurationRoot BuildConfiguration(string baseDirectory) =>
+        new ConfigurationBuilder()
+            .SetBasePath(baseDirectory)
+            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+            .AddEnvironmentVariables(prefix: "WLM_")
+            .Build();
+
+    public static MonitorOptions LoadOptions(IConfiguration configuration, string baseDirectory)
+    {
+        var options = configuration.GetSection("Monitor").Get<MonitorOptions>() ?? new MonitorOptions();
+
+        options.ArtifactsDirectory = ResolvePath(baseDirectory, options.ArtifactsDirectory);
+        options.SitesFile = ResolvePath(baseDirectory, options.SitesFile);
+        return options;
+    }
+
+    public static List<SiteDefinition> LoadSites(string sitesFilePath)
+    {
+        if (!File.Exists(sitesFilePath))
+            throw new FileNotFoundException($"Fichier de sites introuvable : {sitesFilePath}");
+
+        var json = File.ReadAllText(sitesFilePath);
+        var file = JsonSerializer.Deserialize<SitesFile>(json, SitesJsonOptions)
+                   ?? throw new InvalidOperationException($"Impossible de désérialiser {sitesFilePath}.");
+
+        foreach (var site in file.Sites)
+        {
+            if (string.IsNullOrWhiteSpace(site.Name))
+                throw new InvalidOperationException("Un site n'a pas de 'name' dans sites.json.");
+            if (site.Steps.Count == 0)
+                throw new InvalidOperationException($"Le site '{site.Name}' n'a aucune étape.");
+        }
+
+        return file.Sites;
+    }
+
+    private static string ResolvePath(string baseDirectory, string path) =>
+        Path.IsPathRooted(path) ? path : Path.GetFullPath(Path.Combine(baseDirectory, path));
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Services/PageChecks.cs
+################################################################################
+
+using Microsoft.Playwright;
+
+namespace WebLoginMonitor.Services;
+
+public static class PageChecks
+{
+
+    private const string IsBlankScript = @"() => {
+        const body = document.body;
+        if (!body) return true;
+        if ((body.innerText || '').trim().length > 0) return false;
+        const els = body.querySelectorAll('*');
+        for (const el of els) {
+            if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+            const r = el.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) return false;
+        }
+        return true;
+    }";
+
+    public static async Task<bool> IsBlankAsync(IPage page)
+    {
+        try
+        {
+            return await page.EvaluateAsync<bool>(IsBlankScript);
+        }
+        catch (PlaywrightException)
+        {
+
+            return true;
+        }
+    }
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Services/StepExecutor.cs
+################################################################################
+
+using Microsoft.Playwright;
+using NLog;
+using WebLoginMonitor.Models;
+
+namespace WebLoginMonitor.Services;
+
+public sealed class StepExecutor
+{
+    private readonly int _defaultTimeoutMs;
+    private readonly bool _failOnHttpError;
+    private readonly ILogger _log;
+
+    public StepExecutor(int defaultTimeoutMs, bool failOnHttpError, ILogger log)
+    {
+        _defaultTimeoutMs = defaultTimeoutMs;
+        _failOnHttpError = failOnHttpError;
+        _log = log;
+    }
+
+    public async Task ExecuteAsync(IPage page, LoginStep step)
+    {
+        float timeout = step.TimeoutMs ?? _defaultTimeoutMs;
+        var value = SecretResolver.Resolve(step.Value);
+        var url = SecretResolver.Resolve(step.Url);
+
+        _log.Debug("→ {Step}", step.ToString());
+
+        switch (step.Type)
+        {
+            case StepType.Goto:
+            {
+                var response = await page.GotoAsync(
+                    RequireUrl(url, step),
+                    new PageGotoOptions { Timeout = timeout, WaitUntil = WaitUntilState.Load });
+                if (_failOnHttpError && response is not null && response.Status >= 400)
+                    throw new InvalidOperationException($"Statut HTTP {response.Status} ({response.StatusText}) sur {url}");
+                break;
+            }
+
+            case StepType.Fill:
+                await page.FillAsync(
+                    RequireSelector(step),
+                    value ?? string.Empty,
+                    new PageFillOptions { Timeout = timeout });
+                break;
+
+            case StepType.Click:
+                await page.ClickAsync(
+                    RequireSelector(step),
+                    new PageClickOptions { Timeout = timeout });
+                break;
+
+            case StepType.Press:
+                await page.PressAsync(
+                    RequireSelector(step),
+                    RequireValue(value, step, "touche clavier"),
+                    new PagePressOptions { Timeout = timeout });
+                break;
+
+            case StepType.SelectOption:
+            {
+                var selector = RequireSelector(step);
+                var option = RequireValue(value, step, "valeur d'option");
+                var selectOpts = new PageSelectOptionOptions { Timeout = timeout };
+                switch (step.SelectBy ?? SelectBy.Value)
+                {
+                    case SelectBy.Label:
+                        await page.SelectOptionAsync(selector, new SelectOptionValue { Label = option }, selectOpts);
+                        break;
+                    case SelectBy.Index:
+                        if (!int.TryParse(option, out var index))
+                            throw new InvalidOperationException(
+                                $"L'étape '{step}' : 'value' doit être un entier quand selectBy = Index.");
+                        await page.SelectOptionAsync(selector, new SelectOptionValue { Index = index }, selectOpts);
+                        break;
+                    default:
+                        await page.SelectOptionAsync(selector, new[] { option }, selectOpts);
+                        break;
+                }
+                break;
+            }
+
+            case StepType.WaitForSelector:
+                await page.WaitForSelectorAsync(
+                    RequireSelector(step),
+                    new PageWaitForSelectorOptions { Timeout = timeout, State = WaitForSelectorState.Visible });
+                break;
+
+            case StepType.WaitForUrl:
+                await page.WaitForURLAsync(
+                    RequireUrl(url, step),
+                    new PageWaitForURLOptions { Timeout = timeout });
+                break;
+
+            case StepType.WaitForTimeout:
+                await page.WaitForTimeoutAsync(timeout);
+                break;
+
+            case StepType.ExpectVisible:
+                await Assertions.Expect(page.Locator(RequireSelector(step)))
+                    .ToBeVisibleAsync(new LocatorAssertionsToBeVisibleOptions { Timeout = timeout });
+                break;
+
+            case StepType.ExpectText:
+                await Assertions.Expect(page.Locator(RequireSelector(step)))
+                    .ToContainTextAsync(
+                        RequireValue(step.Text, step, "texte attendu"),
+                        new LocatorAssertionsToContainTextOptions { Timeout = timeout });
+                break;
+
+            case StepType.ExpectUrl:
+                await Assertions.Expect(page)
+                    .ToHaveURLAsync(RequireUrl(url, step), new PageAssertionsToHaveURLOptions { Timeout = timeout });
+                break;
+
+            case StepType.ExpectNotBlank:
+                if (await PageChecks.IsBlankAsync(page))
+                    throw new InvalidOperationException("La page est blanche (aucun contenu visible).");
+                break;
+
+            default:
+                throw new NotSupportedException($"Type d'étape non pris en charge : {step.Type}");
+        }
+    }
+
+    private static string RequireSelector(LoginStep step) =>
+        !string.IsNullOrWhiteSpace(step.Selector)
+            ? step.Selector
+            : throw new InvalidOperationException($"L'étape '{step}' requiert un 'selector'.");
+
+    private static string RequireUrl(string? url, LoginStep step) =>
+        !string.IsNullOrWhiteSpace(url)
+            ? url
+            : throw new InvalidOperationException($"L'étape '{step}' requiert une 'url'.");
+
+    private static string RequireValue(string? value, LoginStep step, string what) =>
+        !string.IsNullOrEmpty(value)
+            ? value
+            : throw new InvalidOperationException($"L'étape '{step}' requiert une valeur ({what}).");
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Services/SiteRunner.cs
+################################################################################
+
+using System.Diagnostics;
+using Microsoft.Playwright;
+using NLog;
+using WebLoginMonitor.Models;
+
+namespace WebLoginMonitor.Services;
+
+public sealed class SiteRunner
+{
+    private readonly IBrowser _browser;
+    private readonly MonitorOptions _options;
+    private readonly ILogger _log = LogManager.GetCurrentClassLogger();
+    private readonly ILogger _results = LogManager.GetLogger("Results");
+
+    public SiteRunner(IBrowser browser, MonitorOptions options)
+    {
+        _browser = browser;
+        _options = options;
+    }
+
+    public async Task<SiteResult> RunAsync(SiteDefinition site)
+    {
+        var result = new SiteResult
+        {
+            SiteName = site.Name,
+            StartedAtUtc = DateTime.UtcNow,
+            StepsTotal = site.Steps.Count,
+            Success = true
+        };
+
+        var sw = Stopwatch.StartNew();
+        var defaultTimeout = site.DefaultTimeoutMs ?? _options.DefaultTimeoutMs;
+        var executor = new StepExecutor(defaultTimeout, _options.FailOnHttpError, _log);
+
+        IBrowserContext? context = null;
+        try
+        {
+            context = await _browser.NewContextAsync(new BrowserNewContextOptions
+            {
+                IgnoreHTTPSErrors = true
+            });
+            var page = await context.NewPageAsync();
+
+            _log.Info("▶ '{Site}' — démarrage ({Count} étapes)", site.Name, site.Steps.Count);
+
+            for (int i = 0; i < site.Steps.Count; i++)
+            {
+                var step = site.Steps[i];
+                try
+                {
+                    await executor.ExecuteAsync(page, step);
+                    result.StepsCompleted++;
+                }
+                catch (Exception ex)
+                {
+                    if (step.Optional)
+                    {
+                        _log.Warn("  ↳ étape optionnelle #{N} ignorée ({Step}) : {Msg}", i + 1, step, ex.Message);
+                        continue;
+                    }
+
+                    _log.Debug(ex, "Détail de l'échec à l'étape #{N}", i + 1);
+                    result.Success = false;
+                    result.FailedStepIndex = i;
+                    result.FailedStep = step.ToString();
+                    result.ErrorMessage = FirstLine(ex.Message);
+                    await TryCaptureScreenshotAsync(page, site, result);
+                    break;
+                }
+            }
+
+            if (result.Success && _options.FailOnBlankPage && await PageChecks.IsBlankAsync(page))
+            {
+                _log.Warn("  ↳ page finale blanche détectée");
+                result.Success = false;
+                result.FailedStep = "Contrôle final : page blanche";
+                result.ErrorMessage = "La page finale est blanche (aucun contenu visible).";
+                await TryCaptureScreenshotAsync(page, site, result);
+            }
+        }
+        catch (Exception ex)
+        {
+
+            _log.Debug(ex, "Erreur d'infrastructure pour '{Site}'", site.Name);
+            result.Success = false;
+            result.ErrorMessage = FirstLine(ex.Message);
+        }
+        finally
+        {
+            if (context is not null)
+                await context.CloseAsync();
+            sw.Stop();
+            result.Duration = sw.Elapsed;
+        }
+
+        LogResult(result);
+        return result;
+    }
+
+    private async Task TryCaptureScreenshotAsync(IPage page, SiteDefinition site, SiteResult result)
+    {
+        if (!_options.ScreenshotOnFailure)
+            return;
+
+        try
+        {
+            Directory.CreateDirectory(_options.ArtifactsDirectory);
+            var safeName = string.Join("_", site.Name.Split(Path.GetInvalidFileNameChars()));
+            var stamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+            var path = Path.Combine(_options.ArtifactsDirectory, $"{safeName}_{stamp}.png");
+            await page.ScreenshotAsync(new PageScreenshotOptions { Path = path, FullPage = true });
+            result.ScreenshotPath = path;
+            _log.Info("  ↳ capture d'écran : {Path}", path);
+        }
+        catch (Exception ex)
+        {
+            _log.Warn("  ↳ échec de la capture d'écran : {Msg}", ex.Message);
+        }
+    }
+
+    private void LogResult(SiteResult result)
+    {
+        if (result.Success)
+        {
+            var line = $"OK    | {result.SiteName,-45} | {result.Duration.TotalMilliseconds,6:0} ms | {result.StepsCompleted}/{result.StepsTotal} étapes";
+            _results.Info(line);
+            _log.Info("✔ '{Site}' OK en {Ms:0} ms", result.SiteName, result.Duration.TotalMilliseconds);
+        }
+        else
+        {
+            var line = $"ECHEC | {result.SiteName,-45} | {result.FailureLocation} | {result.ErrorMessage}";
+            _results.Error(line);
+            _log.Error("✘ '{Site}' ÉCHEC — {Where} — {Err}", result.SiteName, result.FailureLocation, result.ErrorMessage);
+        }
+    }
+
+    private static string FirstLine(string? s)
+    {
+        if (string.IsNullOrEmpty(s))
+            return "(erreur inconnue)";
+        var idx = s.IndexOf('\n');
+        return (idx >= 0 ? s[..idx] : s).Trim();
+    }
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Services/NotificationService.cs
+################################################################################
+
+using System.Text;
+using MailKit.Net.Smtp;
+using MailKit.Security;
+using MimeKit;
+using NLog;
+using WebLoginMonitor.Models;
+
+namespace WebLoginMonitor.Services;
+
+public sealed class NotificationService
+{
+    private readonly EmailOptions _email;
+    private readonly ILogger _log = LogManager.GetCurrentClassLogger();
+
+    public NotificationService(EmailOptions email)
+    {
+        _email = email;
+    }
+
+    public async Task SendIfNeededAsync(IReadOnlyList<SiteResult> results)
+    {
+        if (!_email.Enabled)
+        {
+            _log.Debug("Notification e-mail désactivée.");
+            return;
+        }
+
+        int failures = results.Count(r => !r.Success);
+        if (_email.OnlyOnFailure && failures == 0)
+        {
+            _log.Info("Aucun échec : pas d'e-mail (OnlyOnFailure = true).");
+            return;
+        }
+
+        try
+        {
+            await SendAsync(results, failures);
+            _log.Info("E-mail de synthèse envoyé à {Count} destinataire(s).", _email.To.Count);
+        }
+        catch (Exception ex)
+        {
+            _log.Error(ex, "Échec de l'envoi de l'e-mail de synthèse.");
+        }
+    }
+
+    private async Task SendAsync(IReadOnlyList<SiteResult> results, int failures)
+    {
+        if (_email.To.Count == 0)
+            throw new InvalidOperationException("Aucun destinataire configuré (Email.To est vide).");
+
+        var total = results.Count;
+        var stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+        var subjectState = failures == 0 ? "Tout OK" : $"{failures} échec(s)";
+        var subject = $"{_email.SubjectPrefix} {subjectState} — {total} site(s) — {stamp}";
+
+        var message = new MimeMessage();
+        message.From.Add(MailboxAddress.Parse(_email.From));
+        foreach (var to in _email.To)
+            message.To.Add(MailboxAddress.Parse(to));
+        message.Subject = subject;
+        message.Body = new BodyBuilder { HtmlBody = BuildHtml(results, failures, total, stamp) }.ToMessageBody();
+
+        var secure = _email.SmtpPort == 465
+            ? SecureSocketOptions.SslOnConnect
+            : _email.UseStartTls ? SecureSocketOptions.StartTls : SecureSocketOptions.None;
+
+        using var client = new SmtpClient();
+        await client.ConnectAsync(_email.SmtpHost, _email.SmtpPort, secure);
+
+        var user = SecretResolver.Resolve(_email.Username);
+        if (!string.IsNullOrEmpty(user))
+            await client.AuthenticateAsync(user, SecretResolver.Resolve(_email.Password) ?? string.Empty);
+
+        await client.SendAsync(message);
+        await client.DisconnectAsync(true);
+    }
+
+    private static string BuildHtml(IReadOnlyList<SiteResult> results, int failures, int total, string stamp)
+    {
+        var headerColor = failures == 0 ? "#1e7e34" : "#c0392b";
+        var sb = new StringBuilder();
+        sb.Append("<div style='font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#222'>");
+        sb.Append($"<h2 style='color:{headerColor};margin-bottom:4px'>Monitoring des connexions</h2>");
+        sb.Append($"<p style='margin-top:0;color:#666'>{stamp} — {total - failures}/{total} OK, {failures} échec(s)</p>");
+        sb.Append("<table style='border-collapse:collapse;width:100%'>");
+        sb.Append("<tr style='background:#f0f0f0;text-align:left'>"
+            + "<th style='padding:6px;border:1px solid #ddd'>Site</th>"
+            + "<th style='padding:6px;border:1px solid #ddd'>Statut</th>"
+            + "<th style='padding:6px;border:1px solid #ddd'>Durée</th>"
+            + "<th style='padding:6px;border:1px solid #ddd'>Détail</th></tr>");
+
+        foreach (var r in results)
+        {
+            var (bg, badge) = r.Success ? ("#eafaf0", "✔ OK") : ("#fdECEA", "✘ ÉCHEC");
+            var detail = r.Success
+                ? $"{r.StepsCompleted}/{r.StepsTotal} étapes"
+                : Escape($"{r.FailureLocation} — {r.ErrorMessage}");
+
+            sb.Append($"<tr style='background:{bg}'>");
+            sb.Append($"<td style='padding:6px;border:1px solid #ddd'>{Escape(r.SiteName)}</td>");
+            sb.Append($"<td style='padding:6px;border:1px solid #ddd;font-weight:bold'>{badge}</td>");
+            sb.Append($"<td style='padding:6px;border:1px solid #ddd'>{r.Duration.TotalMilliseconds:0} ms</td>");
+            sb.Append($"<td style='padding:6px;border:1px solid #ddd'>{detail}</td>");
+            sb.Append("</tr>");
+        }
+
+        sb.Append("</table>");
+        sb.Append("<p style='color:#999;font-size:12px;margin-top:12px'>Envoyé automatiquement par WebLoginMonitor.</p>");
+        sb.Append("</div>");
+        return sb.ToString();
+    }
+
+    private static string Escape(string? s) =>
+        (s ?? string.Empty)
+            .Replace("&", "&amp;")
+            .Replace("<", "&lt;")
+            .Replace(">", "&gt;");
+}
+
