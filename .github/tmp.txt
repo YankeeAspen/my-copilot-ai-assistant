@@ -1,0 +1,712 @@
+================================================================================
+ WebLoginMonitor - notifications + e-mail + captures d ecran
+ Genere le : 2026-07-27 14:35:31
+ Commentaires retires des fichiers source (.cs). JSON inclus tel quel.
+ 8 fichiers inclus.
+================================================================================
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/appsettings.json
+################################################################################
+
+{
+  "Monitor": {
+    "Browser": "edge",
+    "Headless": true,
+    "SlowMoMs": 0,
+    "DefaultTimeoutMs": 15000,
+    "FailOnHttpError": true,
+    "FailOnBlankPage": true,
+    "MaxParallelism": 1,
+    "SitesFile": "sites.json",
+    "Email": {
+      "Enabled": false,
+      "OnlyOnFailure": false,
+      "SmtpHost": "smtp.example.com",
+      "SmtpPort": 587,
+      "UseStartTls": true,
+      "Username": "${SMTP_USER}",
+      "Password": "${SMTP_PASSWORD}",
+      "From": "monitoring@example.com",
+      "To": [
+        "equipe-support@example.com"
+      ],
+      "SubjectPrefix": "[WebLoginMonitor]",
+      "FooterText": "Envoyé automatiquement par WebLoginMonitor.",
+      "Screenshots": "None"
+    },
+    "SecretServer": {
+      "BaseUrl": "",
+      "ApiPathPrefix": "winauthwebservices/api/v1",
+      "TokenFieldSlug": "apiKey",
+      "Base64Encoded": true,
+      "TimeoutMs": 15000
+    }
+  },
+  "NLog": {
+    "throwConfigExceptions": true,
+    "internalLogLevel": "Warn",
+    "internalLogFile": "${basedir}/logs/nlog-internal.log",
+    "targets": {
+      "console": {
+        "type": "ColoredConsole",
+        "layout": "${time} ${level:uppercase=true:padding=-5} ${message} ${exception:format=Message}",
+        "rowHighlightingRules": [
+          { "condition": "level == LogLevel.Error", "foregroundColor": "Red" },
+          { "condition": "level == LogLevel.Warn", "foregroundColor": "Yellow" },
+          { "condition": "level == LogLevel.Info", "foregroundColor": "Gray" }
+        ]
+      },
+      "file": {
+        "type": "File",
+        "fileName": "${basedir}/logs/monitor-${shortdate}.log",
+        "layout": "${longdate} | ${level:uppercase=true:padding=-5} | ${logger:shortName=true} | ${message} ${onexception:| ${exception:format=ToString}}",
+        "keepFileOpen": false,
+        "encoding": "utf-8",
+        "archiveEvery": "Day",
+        "maxArchiveFiles": 30
+      },
+      "results": {
+        "type": "File",
+        "fileName": "${basedir}/logs/results-${shortdate}.log",
+        "layout": "${longdate} | ${message}",
+        "keepFileOpen": false,
+        "encoding": "utf-8"
+      }
+    },
+    "rules": [
+      { "logger": "Results", "minLevel": "Info", "writeTo": "results" },
+      { "logger": "*", "minLevel": "Info", "writeTo": "console" },
+      { "logger": "*", "minLevel": "Debug", "writeTo": "file" }
+    ]
+  }
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Models/MonitorOptions.cs
+################################################################################
+
+namespace WebLoginMonitor.Models;
+
+public sealed class MonitorOptions
+{
+
+    public string Browser { get; set; } = "edge";
+
+    public bool Headless { get; set; } = true;
+
+    public int SlowMoMs { get; set; }
+
+    public int DefaultTimeoutMs { get; set; } = 15000;
+
+    public bool FailOnHttpError { get; set; } = true;
+
+    public bool FailOnBlankPage { get; set; } = true;
+
+    public int MaxParallelism { get; set; } = 1;
+
+    public string SitesFile { get; set; } = "sites.json";
+
+    public EmailOptions Email { get; set; } = new();
+
+    public SecretServerOptions SecretServer { get; set; } = new();
+}
+
+public sealed class SecretServerOptions
+{
+
+    public string BaseUrl { get; set; } = string.Empty;
+
+    public string ApiPathPrefix { get; set; } = "winauthwebservices/api/v1";
+
+    public string TokenFieldSlug { get; set; } = "apiKey";
+
+    public bool Base64Encoded { get; set; } = true;
+
+    public int TimeoutMs { get; set; } = 15000;
+}
+
+public sealed class EmailOptions
+{
+
+    public bool Enabled { get; set; }
+
+    public bool OnlyOnFailure { get; set; } = false;
+
+    public string SmtpHost { get; set; } = string.Empty;
+    public int SmtpPort { get; set; } = 587;
+
+    public bool UseStartTls { get; set; } = true;
+
+    public string Username { get; set; } = string.Empty;
+
+    public string Password { get; set; } = string.Empty;
+
+    public string From { get; set; } = string.Empty;
+
+    public List<string> To { get; set; } = new();
+
+    public string SubjectPrefix { get; set; } = "[WebLoginMonitor]";
+
+    public string FooterText { get; set; } = "Envoyé automatiquement par WebLoginMonitor.";
+
+    public ScreenshotDelivery Screenshots { get; set; } = ScreenshotDelivery.None;
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Models/ScreenshotDelivery.cs
+################################################################################
+
+namespace WebLoginMonitor.Models;
+
+public enum ScreenshotDelivery
+{
+
+    None,
+
+    Attachment,
+
+    Inline
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Services/ConfigLoader.cs
+################################################################################
+
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Extensions.Configuration;
+using WebLoginMonitor.Models;
+
+namespace WebLoginMonitor.Services;
+
+public static class ConfigLoader
+{
+    private static readonly JsonSerializerOptions SitesJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        ReadCommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true,
+        Converters = { new JsonStringEnumConverter() }
+    };
+
+    public static IConfigurationRoot BuildConfiguration(string baseDirectory) =>
+        new ConfigurationBuilder()
+            .SetBasePath(baseDirectory)
+            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+            .AddEnvironmentVariables(prefix: "WLM_")
+            .Build();
+
+    public static MonitorOptions LoadOptions(IConfiguration configuration, string baseDirectory)
+    {
+        var options = configuration.GetSection("Monitor").Get<MonitorOptions>() ?? new MonitorOptions();
+
+        options.SitesFile = ResolvePath(baseDirectory, options.SitesFile);
+        return options;
+    }
+
+    public static List<SiteDefinition> LoadSites(string sitesFilePath)
+    {
+        if (!File.Exists(sitesFilePath))
+            throw new FileNotFoundException($"Fichier de sites introuvable : {sitesFilePath}");
+
+        var json = File.ReadAllText(sitesFilePath);
+        var file = JsonSerializer.Deserialize<SitesFile>(json, SitesJsonOptions)
+                   ?? throw new InvalidOperationException($"Impossible de désérialiser {sitesFilePath}.");
+
+        foreach (var site in file.Sites)
+        {
+            if (string.IsNullOrWhiteSpace(site.Name))
+                throw new InvalidOperationException("Un site n'a pas de 'name' dans sites.json.");
+            if (site.Steps.Count == 0)
+                throw new InvalidOperationException($"Le site '{site.Name}' n'a aucune étape.");
+        }
+
+        return file.Sites;
+    }
+
+    private static string ResolvePath(string baseDirectory, string path) =>
+        Path.IsPathRooted(path) ? path : Path.GetFullPath(Path.Combine(baseDirectory, path));
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Services/ScreenshotStore.cs
+################################################################################
+
+using NLog;
+
+namespace WebLoginMonitor.Services;
+
+public sealed class ScreenshotStore : IDisposable
+{
+    private readonly string _directory;
+    private readonly ILogger _log;
+
+    public ScreenshotStore(ILogger log)
+    {
+        _log = log;
+        _directory = Path.Combine(Path.GetTempPath(), "WebLoginMonitor", Guid.NewGuid().ToString("N"));
+    }
+
+    public string NewPngPath(string siteName)
+    {
+        Directory.CreateDirectory(_directory);
+        var safe = string.Join("_", siteName.Split(Path.GetInvalidFileNameChars()));
+        return Path.Combine(_directory, $"{safe}_{Guid.NewGuid():N}.png");
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            if (Directory.Exists(_directory))
+            {
+                Directory.Delete(_directory, recursive: true);
+                _log.Debug("Captures temporaires supprimées ({Dir}).", _directory);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Warn("Impossible de supprimer les captures temporaires ({Dir}) : {Msg}", _directory, ex.Message);
+        }
+    }
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Services/SiteRunner.cs
+################################################################################
+
+using System.Diagnostics;
+using Microsoft.Playwright;
+using NLog;
+using WebLoginMonitor.Models;
+
+namespace WebLoginMonitor.Services;
+
+public sealed class SiteRunner
+{
+    private readonly IBrowser _browser;
+    private readonly MonitorOptions _options;
+    private readonly SecretServerClient? _secretServer;
+    private readonly ScreenshotStore? _screenshots;
+    private readonly ILogger _log = LogManager.GetCurrentClassLogger();
+    private readonly ILogger _results = LogManager.GetLogger("Results");
+
+    public SiteRunner(IBrowser browser, MonitorOptions options,
+        SecretServerClient? secretServer = null, ScreenshotStore? screenshots = null)
+    {
+        _browser = browser;
+        _options = options;
+        _secretServer = secretServer;
+        _screenshots = screenshots;
+    }
+
+    public async Task<SiteResult> RunAsync(SiteDefinition site)
+    {
+        var result = new SiteResult
+        {
+            SiteName = site.Name,
+            StartedAtUtc = DateTime.UtcNow,
+            StepsTotal = site.Steps.Count,
+            Success = true
+        };
+
+        var sw = Stopwatch.StartNew();
+        var defaultTimeout = site.DefaultTimeoutMs ?? _options.DefaultTimeoutMs;
+        var executor = new StepExecutor(defaultTimeout, _options.FailOnHttpError, _log, _secretServer);
+
+        IBrowserContext? context = null;
+        try
+        {
+            context = await _browser.NewContextAsync(new BrowserNewContextOptions
+            {
+                IgnoreHTTPSErrors = true
+            });
+            var page = await context.NewPageAsync();
+
+            _log.Info("'{Site}' — démarrage ({Count} étapes)", site.Name, site.Steps.Count);
+
+            for (int i = 0; i < site.Steps.Count; i++)
+            {
+                var step = site.Steps[i];
+                try
+                {
+                    await executor.ExecuteAsync(page, step);
+                    result.StepsCompleted++;
+                }
+                catch (Exception ex)
+                {
+                    if (step.Optional)
+                    {
+                        _log.Warn("étape optionnelle #{N} ignorée ({Step}) : {Msg}", i + 1, step, ex.Message);
+                        continue;
+                    }
+
+                    _log.Debug(ex, "Détail de l'échec à l'étape #{N}", i + 1);
+                    result.Success = false;
+                    result.FailedStepIndex = i;
+                    result.FailedStep = step.ToString();
+                    result.ErrorMessage = FirstLine(ex.Message);
+                    await TryCaptureScreenshotAsync(page, site, result);
+                    break;
+                }
+            }
+
+            if (result.Success && _options.FailOnBlankPage && await PageChecks.IsBlankAsync(page))
+            {
+                _log.Warn("page finale blanche détectée");
+                result.Success = false;
+                result.FailedStep = "Contrôle final : page blanche";
+                result.ErrorMessage = "La page finale est blanche (aucun contenu visible).";
+                await TryCaptureScreenshotAsync(page, site, result);
+            }
+        }
+        catch (Exception ex)
+        {
+
+            _log.Debug(ex, "Erreur d'infrastructure pour '{Site}'", site.Name);
+            result.Success = false;
+            result.ErrorMessage = FirstLine(ex.Message);
+        }
+        finally
+        {
+            if (context is not null)
+                await context.CloseAsync();
+            sw.Stop();
+            result.Duration = sw.Elapsed;
+        }
+
+        LogResult(result);
+        return result;
+    }
+
+    private async Task TryCaptureScreenshotAsync(IPage page, SiteDefinition site, SiteResult result)
+    {
+
+        if (_screenshots is null)
+            return;
+
+        try
+        {
+            var path = _screenshots.NewPngPath(site.Name);
+            await page.ScreenshotAsync(new PageScreenshotOptions { Path = path, FullPage = true });
+            result.ScreenshotPath = path;
+            _log.Info("capture d'écran (temporaire) : {Path}", path);
+        }
+        catch (Exception ex)
+        {
+            _log.Warn("échec de la capture d'écran : {Msg}", ex.Message);
+        }
+    }
+
+    private void LogResult(SiteResult result)
+    {
+        if (result.Success)
+        {
+            var line = $"OK    | {result.SiteName,-45} | {result.Duration.TotalMilliseconds,6:0} ms | {result.StepsCompleted}/{result.StepsTotal} étapes";
+            _results.Info(line);
+            _log.Info("'{Site}' OK en {Ms:0} ms", result.SiteName, result.Duration.TotalMilliseconds);
+        }
+        else
+        {
+            var line = $"ECHEC | {result.SiteName,-45} | {result.FailureLocation} | {result.ErrorMessage}";
+            _results.Error(line);
+            _log.Error("'{Site}' ÉCHEC — {Where} — {Err}", result.SiteName, result.FailureLocation, result.ErrorMessage);
+        }
+    }
+
+    private static string FirstLine(string? s)
+    {
+        if (string.IsNullOrEmpty(s))
+            return "(erreur inconnue)";
+        var idx = s.IndexOf('\n');
+        return (idx >= 0 ? s[..idx] : s).Trim();
+    }
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Services/NotificationService.cs
+################################################################################
+
+using System.Text;
+using MailKit.Net.Smtp;
+using MailKit.Security;
+using MimeKit;
+using MimeKit.Utils;
+using NLog;
+using WebLoginMonitor.Models;
+
+namespace WebLoginMonitor.Services;
+
+public sealed class NotificationService
+{
+    private readonly EmailOptions _email;
+    private readonly ILogger _log = LogManager.GetCurrentClassLogger();
+
+    public NotificationService(EmailOptions email)
+    {
+        _email = email;
+    }
+
+    public async Task SendIfNeededAsync(IReadOnlyList<SiteResult> results)
+    {
+        if (!_email.Enabled)
+        {
+            _log.Debug("Notification e-mail désactivée.");
+            return;
+        }
+
+        int failures = results.Count(r => !r.Success);
+        if (_email.OnlyOnFailure && failures == 0)
+        {
+            _log.Info("Aucun échec : pas d'e-mail (OnlyOnFailure = true).");
+            return;
+        }
+
+        try
+        {
+            await SendAsync(results, failures);
+            _log.Info("E-mail de synthèse envoyé à {Count} destinataire(s).", _email.To.Count);
+        }
+        catch (Exception ex)
+        {
+            _log.Error(ex, "Échec de l'envoi de l'e-mail de synthèse.");
+        }
+    }
+
+    private async Task SendAsync(IReadOnlyList<SiteResult> results, int failures)
+    {
+        if (_email.To.Count == 0)
+            throw new InvalidOperationException("Aucun destinataire configuré (Email.To est vide).");
+
+        var total = results.Count;
+        var stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+        var subjectState = failures == 0 ? "Tout OK" : $"{failures} échec(s)";
+        var subject = $"{_email.SubjectPrefix} {subjectState} — {total} site(s) — {stamp}";
+
+        var message = new MimeMessage();
+        message.From.Add(MailboxAddress.Parse(_email.From));
+        foreach (var to in _email.To)
+            message.To.Add(MailboxAddress.Parse(to));
+        message.Subject = subject;
+
+        var builder = new BodyBuilder();
+
+        var inlineCids = new Dictionary<SiteResult, string>();
+        if (_email.Screenshots != ScreenshotDelivery.None)
+        {
+            foreach (var r in results.Where(HasScreenshotFile))
+            {
+                if (_email.Screenshots == ScreenshotDelivery.Inline)
+                {
+                    var resource = builder.LinkedResources.Add(r.ScreenshotPath!);
+                    resource.ContentId = MimeUtils.GenerateMessageId();
+                    inlineCids[r] = resource.ContentId;
+                }
+                else
+                {
+                    builder.Attachments.Add(r.ScreenshotPath!);
+                }
+            }
+        }
+
+        builder.HtmlBody = BuildHtml(results, failures, total, stamp, _email.FooterText, inlineCids);
+        message.Body = builder.ToMessageBody();
+
+        var secure = _email.SmtpPort == 465
+            ? SecureSocketOptions.SslOnConnect
+            : _email.UseStartTls ? SecureSocketOptions.StartTls : SecureSocketOptions.None;
+
+        using var client = new SmtpClient();
+        await client.ConnectAsync(_email.SmtpHost, _email.SmtpPort, secure);
+
+        var user = SecretResolver.Resolve(_email.Username);
+        if (!string.IsNullOrEmpty(user))
+            await client.AuthenticateAsync(user, SecretResolver.Resolve(_email.Password) ?? string.Empty);
+
+        await client.SendAsync(message);
+        await client.DisconnectAsync(true);
+    }
+
+    private static bool HasScreenshotFile(SiteResult r) =>
+        !string.IsNullOrEmpty(r.ScreenshotPath) && File.Exists(r.ScreenshotPath);
+
+    private static string BuildHtml(
+        IReadOnlyList<SiteResult> results, int failures, int total, string stamp,
+        string? footerText, IReadOnlyDictionary<SiteResult, string> inlineScreenshots)
+    {
+        var headerColor = failures == 0 ? "#1e7e34" : "#c0392b";
+        var sb = new StringBuilder();
+        sb.Append("<div style='font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#222'>");
+        sb.Append($"<h2 style='color:{headerColor};margin-bottom:4px'>Monitoring des connexions</h2>");
+        sb.Append($"<p style='margin-top:0;color:#666'>{stamp} — {total - failures}/{total} OK, {failures} échec(s)</p>");
+        sb.Append("<table style='border-collapse:collapse;width:100%'>");
+        sb.Append("<tr style='background:#f0f0f0;text-align:left'>"
+            + "<th style='padding:6px;border:1px solid #ddd'>Site</th>"
+            + "<th style='padding:6px;border:1px solid #ddd'>Statut</th>"
+            + "<th style='padding:6px;border:1px solid #ddd'>Durée</th>"
+            + "<th style='padding:6px;border:1px solid #ddd'>Détail</th></tr>");
+
+        foreach (var r in results)
+        {
+            var (bg, badge) = r.Success ? ("#eafaf0", "OK") : ("#fdECEA", "ÉCHEC");
+            var detail = r.Success
+                ? $"{r.StepsCompleted}/{r.StepsTotal} étapes"
+                : Escape($"{r.FailureLocation} — {r.ErrorMessage}");
+
+            if (inlineScreenshots.TryGetValue(r, out var cid))
+                detail += $"<br><img src='cid:{cid}' alt='Capture' " +
+                          "style='max-width:600px;margin-top:6px;border:1px solid #ddd' />";
+
+            sb.Append($"<tr style='background:{bg}'>");
+            sb.Append($"<td style='padding:6px;border:1px solid #ddd'>{Escape(r.SiteName)}</td>");
+            sb.Append($"<td style='padding:6px;border:1px solid #ddd;font-weight:bold'>{badge}</td>");
+            sb.Append($"<td style='padding:6px;border:1px solid #ddd'>{r.Duration.TotalMilliseconds:0} ms</td>");
+            sb.Append($"<td style='padding:6px;border:1px solid #ddd'>{detail}</td>");
+            sb.Append("</tr>");
+        }
+
+        sb.Append("</table>");
+        if (!string.IsNullOrWhiteSpace(footerText))
+            sb.Append($"<p style='color:#999;font-size:12px;margin-top:12px'>{Escape(footerText)}</p>");
+        sb.Append("</div>");
+        return sb.ToString();
+    }
+
+    private static string Escape(string? s) =>
+        (s ?? string.Empty)
+            .Replace("&", "&amp;")
+            .Replace("<", "&lt;")
+            .Replace(">", "&gt;");
+}
+
+
+################################################################################
+### FICHIER : src/WebLoginMonitor/Program.cs
+################################################################################
+
+using Microsoft.Playwright;
+using NLog;
+using NLog.Extensions.Logging;
+using WebLoginMonitor.Models;
+using WebLoginMonitor.Services;
+
+var baseDir = AppContext.BaseDirectory;
+
+if (args.Contains("--install"))
+{
+    return Microsoft.Playwright.Program.Main(["install", "chromium"]);
+}
+
+var configuration = ConfigLoader.BuildConfiguration(baseDir);
+LogManager.Configuration = new NLogLoggingConfiguration(configuration.GetSection("NLog"));
+var log = LogManager.GetCurrentClassLogger();
+
+int exitCode = 0;
+SecretServerClient? secretServer = null;
+ScreenshotStore? screenshots = null;
+try
+{
+    var options = ConfigLoader.LoadOptions(configuration, baseDir);
+    var sites = ConfigLoader.LoadSites(options.SitesFile);
+
+    if (!string.IsNullOrWhiteSpace(options.SecretServer.BaseUrl))
+        secretServer = new SecretServerClient(options.SecretServer, LogManager.GetLogger("SecretServer"));
+
+    if (options.Email.Enabled && options.Email.Screenshots != ScreenshotDelivery.None)
+        screenshots = new ScreenshotStore(LogManager.GetLogger("Screenshots"));
+
+    var onlyArg = args.FirstOrDefault(a => a.StartsWith("--only=", StringComparison.OrdinalIgnoreCase));
+    var only = onlyArg?["--only=".Length..];
+
+    var active = sites
+        .Where(s => s.Enabled)
+        .Where(s => only is null || s.Name.Contains(only, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    if (active.Count == 0)
+    {
+        log.Warn("Aucun site actif à tester (vérifiez 'enabled' dans {File}).", options.SitesFile);
+        return 0;
+    }
+
+    log.Info("=== WebLoginMonitor — {Count} site(s) — {Browser} (headless={Headless}) ===",
+        active.Count, options.Browser, options.Headless);
+
+    using var playwright = await Playwright.CreateAsync();
+    var launchOptions = new BrowserTypeLaunchOptions
+    {
+        Headless = options.Headless,
+        SlowMo = options.SlowMoMs
+    };
+
+    IBrowserType browserType;
+    switch (options.Browser.ToLowerInvariant())
+    {
+        case "firefox": browserType = playwright.Firefox; break;
+        case "webkit": browserType = playwright.Webkit; break;
+        case "edge" or "msedge": browserType = playwright.Chromium; launchOptions.Channel = "msedge"; break;
+        case "chrome": browserType = playwright.Chromium; launchOptions.Channel = "chrome"; break;
+        default: browserType = playwright.Chromium; break;
+    }
+
+    IBrowser browser;
+    try
+    {
+        browser = await browserType.LaunchAsync(launchOptions);
+    }
+    catch (PlaywrightException ex) when (
+        ex.Message.Contains("Executable doesn't exist", StringComparison.OrdinalIgnoreCase) ||
+        ex.Message.Contains("is not found", StringComparison.OrdinalIgnoreCase))
+    {
+        log.Fatal("Navigateur '{Browser}' introuvable. Chromium/Firefox/WebKit : `dotnet run --project src/WebLoginMonitor -- --install`. " +
+                  "Edge/Chrome : vérifiez qu'il est installé sur la machine.", options.Browser);
+        log.Debug(ex, "Détail");
+        return 2;
+    }
+
+    var runner = new SiteRunner(browser, options, secretServer, screenshots);
+    var gate = new SemaphoreSlim(Math.Max(1, options.MaxParallelism));
+
+    var tasks = active.Select(async site =>
+    {
+        await gate.WaitAsync();
+        try { return await runner.RunAsync(site); }
+        finally { gate.Release(); }
+    });
+
+    var results = await Task.WhenAll(tasks);
+    await browser.CloseAsync();
+
+    var failures = results.Count(r => !r.Success);
+    log.Info("=== Terminé : {Ok}/{Total} OK, {Fail} échec(s) ===",
+        results.Length - failures, results.Length, failures);
+
+    var notifier = new NotificationService(options.Email);
+    await notifier.SendIfNeededAsync(results);
+
+    exitCode = failures == 0 ? 0 : 1;
+}
+catch (Exception ex)
+{
+    log.Fatal(ex, "Erreur fatale du monitoring.");
+    exitCode = 3;
+}
+finally
+{
+
+    screenshots?.Dispose();
+    secretServer?.Dispose();
+    LogManager.Shutdown();
+}
+
+return exitCode;
+
+
