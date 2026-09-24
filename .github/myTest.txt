@@ -1,0 +1,180 @@
+# Vérifier les personnalisations retransmises par CGI : `Analyse-CycleLong.ps1`
+
+> ℹ️ **En bref** : vous recevez un script de mise à jour CGI (cycle long) pour les bases oCharlie ? Lancez ce script en lui donnant **ce script CGI** et **le dossier de toutes nos personnalisations** (cycle court). Il vous donne la liste des fichiers cycle court dont l'objet est renvoyé par CGI : ce sont eux qu'il faut harmoniser avant de passer le script, sinon nos personnalisations sont écrasées.
+
+## Pourquoi utiliser ce script ?
+
+Quand CGI modifie un objet (procédure, fonction, vue, trigger, table…), il le renvoie dans un script de mise à jour : c'est le **cycle long**. Quand il ne le modifie pas, il ne le renvoie pas.
+
+De notre côté, les équipes ont personnalisé certains de ces objets : c'est le **cycle court**, avec un fichier `.sql` par objet modifié.
+
+**Le risque** : si le script CGI contient un objet que nous avons personnalisé, le passer tel quel **écrase notre personnalisation**, et c'est une régression en production.
+
+Chercher à la main nos centaines de personnalisations dans un script CGI de plusieurs dizaines de Mo est long et source d'oublis. Le script le fait en quelques secondes.
+
+## Quand l'utiliser ?
+
+**À chaque réception d'un script CGI**, avant de le passer, quel que soit l'environnement.
+
+## Prérequis
+
+| Élément | Détail |
+|---|---|
+| Poste | Windows, avec Windows PowerShell 5.1 (installé par défaut) ou PowerShell 7 |
+| Accès | Lecture sur le script CGI et sur le dossier des scripts cycle court |
+| Script | `Analyse-CycleLong.ps1`, en pièce jointe de cette page |
+
+> ⚠️ Si PowerShell refuse d'exécuter le script (« l'exécution de scripts est désactivée »), ajoutez `powershell.exe -ExecutionPolicy Bypass -File` devant la commande (voir la section « Dépannage »), ou débloquez le fichier une fois pour toutes : `Unblock-File .\Analyse-CycleLong.ps1`
+
+## Utilisation : un script CGI contre toutes nos personnalisations
+
+C'est l'usage principal du script.
+
+1. Télécharger `Analyse-CycleLong.ps1` (pièce jointe).
+2. Ouvrir PowerShell dans le dossier du script.
+3. Lancer la commande en indiquant :
+   - `-CycleLong` : **le chemin du script CGI** reçu ;
+   - `-CycleCourt` : **le dossier qui contient toutes nos personnalisations** (les sous-dossiers sont inclus).
+
+```powershell
+.\Analyse-CycleLong.ps1 -CycleLong 'D:\Livraisons_CGI\V12.3\patch_V12.3.sql' -CycleCourt 'D:\SQL\Personnalisations'
+```
+
+4. Lire le résultat dans la console (voir ci-dessous). Le détail est aussi enregistré dans un dossier `Rapport_Analyse_<date>_<heure>`, à ouvrir dans Excel.
+
+### Variantes de la même commande
+
+| Besoin | Commande |
+|---|---|
+| Juste le résumé dans la console, sans générer de fichiers | `.\Analyse-CycleLong.ps1 -CycleLong 'D:\Livraisons_CGI\V12.3\patch_V12.3.sql' -CycleCourt 'D:\SQL\Personnalisations' -NoCsv` |
+| Enregistrer le rapport dans un dossier précis | `.\Analyse-CycleLong.ps1 -CycleLong 'D:\Livraisons_CGI\V12.3\patch_V12.3.sql' -CycleCourt 'D:\SQL\Personnalisations' -OutputDir 'D:\Rapports\V12.3'` |
+| Fichiers sur un partage réseau | `.\Analyse-CycleLong.ps1 -CycleLong '\\srv-fichiers\CGI\V12.3\patch_V12.3.sql' -CycleCourt '\\srv-fichiers\SQL\Personnalisations'` |
+| Chemin avec espaces ou crochets | `.\Analyse-CycleLong.ps1 -CycleLong 'D:\Livraisons CGI\Lot [V12.3]\patch.sql' -CycleCourt 'D:\SQL\Perso équipe'` |
+
+> ℹ️ Mettez toujours les chemins entre quotes simples `'...'` : c'est indispensable dès qu'ils contiennent des espaces ou des crochets, et sans effet sinon.
+
+## Lire le résultat
+
+### Dans la console
+
+```
+Analyse cycle long / cycle court
+  Cycle long  : fichier D:\Livraisons_CGI\V12.3\patch_V12.3.sql -> 1 script(s), 12,4 Mo
+  Cycle court : 412 script(s)
+
+Cycle long : D:\Livraisons_CGI\V12.3\patch_V12.3.sql (12,4 Mo)
+  CC001_ps_Calcul.sql       PROCEDURE dbo.ps_Calcul     DROP + CREATE
+  CC002_v_Client.sql        VIEW      dbo.v_Client      CREATE OR ALTER
+  CC003_fn_Obsolete.sql     FUNCTION  dbo.fn_Obsolete   DROP
+  CC005_ps_Autre.sql        PROCEDURE dbo.ps_Autre      SP_RENAME -> ps_Autre_old
+  => 4 script(s) cycle court retransmis sur 245 objet(s) livré(s)
+  A vérifier manuellement dans le fichier (1) :
+    ligne 1834    SQL dynamique : CREATE OR ALTER PROCEDURE au nom construit dynamiquement
+                  CREATE OR ALTER PROCEDURE
+
+Synthèse
+  Objets personnalisés : 412 (dans 412 fichier(s) cycle court)
+  Retransmis par le fournisseur : 4
+  Non retransmis                : 408
+  A vérifier manuellement       : 1 (voir A_Verifier.csv)
+  Rapport : D:\Outils\Rapport_Analyse_20260924_143012
+```
+
+Chaque ligne du bloc « Cycle long » est **un fichier cycle court à harmoniser** :
+
+- **En jaune** : l'objet est modifié ou recréé par CGI.
+- **En magenta** : l'objet est **supprimé** (`DROP`) ou **renommé** (`SP_RENAME`) par CGI. Ces cas sont à traiter en priorité.
+- **« Aucun script cycle court retransmis »** en vert : le script CGI ne touche à aucune de nos personnalisations, il peut être passé tel quel.
+
+### La colonne `ActionFournisseur` : que faire ?
+
+| Valeur | Signification | Que faire |
+|---|---|---|
+| `CREATE`, `ALTER`, `CREATE OR ALTER`, `DROP + CREATE` | CGI renvoie une nouvelle version de l'objet | Reporter notre personnalisation dans la version CGI |
+| `DROP` | CGI supprime l'objet | Vérifier si la personnalisation doit être abandonnée ou déplacée |
+| `SP_RENAME -> nouveau_nom` | CGI renomme l'objet | Reporter la personnalisation sur l'objet renommé |
+| `SP_RENAME colonne X -> Y` | CGI renomme une colonne de la table | Vérifier nos scripts qui utilisent cette colonne |
+| `... (SQL dynamique)` | Objet créé via `EXEC('...')` ou `sp_executesql` | Ouvrir le script CGI à la ligne indiquée pour confirmer |
+
+### Les fichiers du rapport
+
+| Fichier | Contenu |
+|---|---|
+| `Synthese.csv` | **Le fichier principal** : la liste des fichiers cycle court retransmis, avec l'objet, l'action CGI et la ligne du script CGI où il se trouve. |
+| `A_Verifier.csv` | Points que le script ne peut pas trancher seul : **à ouvrir à la ligne indiquée** dans le script CGI. |
+| `Inventaire_CycleCourt.csv` | Toutes nos personnalisations, avec `Retransmis = Oui/Non`. |
+| `Anomalies.csv` | Fichiers illisibles, fichiers cycle court sans objet détecté, objet personnalisé dans plusieurs fichiers. |
+
+## Points à vérifier manuellement
+
+Certains cas ne peuvent pas être tranchés automatiquement. Le script les signale avec leur **numéro de ligne** : ouvrez le script CGI à cet endroit.
+
+- **SQL dynamique** : objet créé dans une chaîne (`EXEC('CREATE PROCEDURE ...')`), surtout quand le nom est construit par concaténation (`'CREATE PROCEDURE ' + @nom`).
+- **`sp_rename` non analysable** : paramètres passés par variables, ou `sp_rename` lui-même écrit en SQL dynamique.
+
+> ℹ️ Le SQL dynamique situé **dans le corps** d'une procédure n'est pas signalé : il s'exécute quand la procédure est appelée, pas au passage du script.
+
+## Ce que le script détecte, et ce qu'il ne fait pas
+
+**Détecté :**
+
+- les `CREATE`, `ALTER`, `CREATE OR ALTER` et `DROP` de procédures, fonctions, vues, triggers, tables, types, synonymes, séquences et index ;
+- les renommages par `sp_rename` (objet, colonne, index, type) ;
+- les créations en SQL dynamique.
+
+Les objets sont reconnus **par leur contenu SQL**, pas par le nom du fichier. `[dbo].[ps_X]`, `dbo.ps_X` et `ps_X` désignent le même objet. Les commentaires sont ignorés : un `CREATE PROCEDURE` en commentaire n'est pas pris en compte.
+
+**Hors périmètre :**
+
+- **Le contenu n'est pas comparé** : le script indique *que* CGI renvoie l'objet, pas *ce qui* a changé. Pour le détail, comparer les deux versions dans WinMerge, VS Code ou SSMS.
+- **Les impacts indirects ne sont pas détectés** : si CGI modifie une table utilisée par une de nos procédures sans renvoyer la procédure, rien n'est signalé.
+
+## Gros scripts CGI
+
+Le script lit le fichier CGI en continu, sans le charger en mémoire : les scripts de plusieurs centaines de Mo sont acceptés. Au-delà de 16 Mo, une barre de progression s'affiche.
+
+| Taille du script CGI | Durée mesurée |
+|---|---|
+| 56 Mo | ~10 à 25 s |
+| 280 Mo | ~35 à 55 s |
+
+Les fichiers sont lus en UTF-8, UTF-16 (scripts générés par SSMS) et ANSI, sans rien à configurer.
+
+## Dépannage
+
+| Symptôme | Cause / solution |
+|---|---|
+| « L'exécution de scripts est désactivée sur ce système » | Lancer : `powershell.exe -ExecutionPolicy Bypass -File .\Analyse-CycleLong.ps1 -CycleLong '...' -CycleCourt '...'`, ou exécuter une fois `Unblock-File .\Analyse-CycleLong.ps1`. |
+| Avertissement « Lecteur rapide indisponible » | Le poste bloque la compilation (`Add-Type`). Le script continue en mode PowerShell pur, avec le même résultat mais plus lentement. |
+| « Chemin introuvable » | Vérifier le chemin et l'entourer de quotes simples : `'D:\Mon dossier\...'`. |
+| Un fichier cycle court apparaît dans `Anomalies.csv` « Aucun objet détecté » | Le fichier ne contient ni `CREATE`, ni `ALTER`, ni `DROP` exploitable (fichier vide, ou uniquement des commentaires ou du DML). À contrôler. |
+| « Objet personnalisé dans N fichiers » | Plusieurs fichiers cycle court modifient le même objet. Tous sont listés : vérifier lequel est la version de référence. |
+
+## Autres usages possibles
+
+Le script accepte aussi d'autres entrées, pour des besoins ponctuels :
+
+| Besoin | Commande |
+|---|---|
+| Analyser tous les scripts d'une livraison CGI d'un coup (dossier, sous-dossiers inclus) | `.\Analyse-CycleLong.ps1 -CycleLong 'D:\Livraisons_CGI\V12.3' -CycleCourt 'D:\SQL\Personnalisations'` |
+| Plusieurs scripts CGI précis | `.\Analyse-CycleLong.ps1 -CycleLong 'D:\Livraisons_CGI\V12.3\patch_1.sql', 'D:\Livraisons_CGI\V12.3\patch_2.sql' -CycleCourt 'D:\SQL\Personnalisations'` |
+| Contrôler une seule personnalisation | `.\Analyse-CycleLong.ps1 -CycleLong 'D:\Livraisons_CGI\V12.3\patch_V12.3.sql' -CycleCourt 'D:\SQL\Personnalisations\CC001_ps_Calcul.sql'` |
+
+Tous les paramètres sont décrits dans l'aide intégrée : `Get-Help .\Analyse-CycleLong.ps1 -Full`
+
+| Paramètre | Obligatoire | Description |
+|---|---|---|
+| `-CycleLong` | Oui | Le script CGI à analyser (ou un dossier, voir ci-dessus). |
+| `-CycleCourt` | Oui | Le dossier de nos personnalisations (sous-dossiers inclus). |
+| `-NoCsv` | Non | Aucun fichier généré : résumé console uniquement. |
+| `-OutputDir` | Non | Dossier du rapport. Par défaut : `.\Rapport_Analyse_<date>_<heure>`. |
+| `-DefaultSchema` | Non | Schéma des objets non qualifiés (défaut : `dbo`). |
+| `-Filter` | Non | Extension des fichiers cherchés dans les dossiers (défaut : `*.sql`). |
+| `-CsvDelimiter` | Non | Séparateur CSV (défaut : `;`, compatible Excel français). |
+| `-PassThru` | Non | Renvoie les résultats dans le pipeline PowerShell. |
+
+## Contact
+
+Script maintenu par : **[À COMPLÉTER]**
+
+Questions et évolutions : **[À COMPLÉTER : canal / équipe]**
