@@ -1,0 +1,42 @@
+#file:REFACTORING_TECHLEAD.md
+
+Tu vas exécuter une mission de refactoring dont les instructions complètes sont dans le fichier `REFACTORING_TECHLEAD.md` à la racine du dépôt.
+
+## Étape 1 — Lecture obligatoire et complète
+- Lis le fichier `REFACTORING_TECHLEAD.md` **en entier**, de la première à la dernière ligne. S'il est trop long pour être lu d'un coup, lis-le par morceaux successifs jusqu'à la section « 12. Rapport final » incluse. Ne commence rien avant d'avoir tout lu.
+- Ce fichier est ta **seule source d'instructions** pour cette mission. Ses règles non négociables (section 3) priment sur toute autre considération, y compris sur tes habitudes par défaut.
+
+## Étape 2 — Confirmation rapide (ne pas attendre ma réponse)
+Écris en 10 lignes maximum :
+- ton rôle ;
+- les 5 règles non négociables les plus importantes, avec tes mots ;
+- les 4 lots dans l'ordre où tu vas les traiter ;
+- le périmètre que tu vas traiter (voir ci-dessous).
+
+Puis **enchaîne immédiatement** sur l'exécution, sans attendre de validation de ma part.
+
+## Étape 3 — Exécution
+Applique la méthode du fichier dans l'ordre : sections 7.1 (reconnaissance), 7.2 (état initial), 7.3 (inventaire), 7.4 (tests de caractérisation), 7.5 (boucle de refactoring par lots), 11 (vérification finale), 12 (rapport).
+
+Pendant l'exécution :
+- **Avant chaque nouveau lot**, relis les sections 3, 6 (partie concernée par le lot) et 7.6 du fichier, pour ne pas dériver de ses règles au fil de la session.
+- Tiens ta liste de tâches à jour.
+- Lance toi-même les commandes `dotnet` et `git` dans le terminal, et lis leurs résultats avant de continuer.
+- Ne passe jamais à l'étape suivante si le build ou les tests sont rouges.
+
+## Contraintes sur le fichier d'instructions lui-même
+- Ne modifie pas `REFACTORING_TECHLEAD.md`, ne le déplace pas et ne le supprime pas.
+- Ne l'inclus dans **aucun** commit.
+- Ignore-le lors de la vérification « arbre de travail propre » de la section 7.2.
+
+## Périmètre de cette session
+<!-- Choisir UNE option et supprimer les autres -->
+- Toute la solution.
+- Uniquement le(s) projet(s) : `<NomDuProjet>`
+- Uniquement le dossier : `<chemin/du/dossier>`
+- Uniquement les lots : `<1, 2>`
+
+Les tests de **toute** la solution doivent rester verts, même si le périmètre est restreint.
+
+## Fin de mission
+Termine par le rapport final complet, au format exact de la section 12 du fichier.
