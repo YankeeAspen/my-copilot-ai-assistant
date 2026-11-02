@@ -1,0 +1,13 @@
+#file:REFACTORING_TECHLEAD.md
+
+Reprise de la mission décrite dans `REFACTORING_TECHLEAD.md`. Relis-le **en entier** avant de commencer, avec les mêmes contraintes que la session précédente : ne pas modifier ce fichier, ne pas le commiter, l'ignorer dans la vérification git.
+
+Contexte : une session précédente a déjà traité une partie du travail sur la branche `refactor/sonar-cleanup`.
+- Place-toi sur cette branche (ne crée pas de nouvelle branche).
+- Lance `git log --oneline` pour voir ce qui a déjà été fait.
+- Refais l'état initial (section 7.2) sur l'état actuel : build et tests doivent être verts avant de continuer.
+
+Reste à traiter (extrait du rapport précédent) :
+<coller ici la section « Dette restante » / « reste à faire » du dernier rapport>
+
+Poursuis la méthode à partir de là, puis termine par le rapport complet (section 12). Dans la section « État initial / final », indique les chiffres du **tout premier** état initial si tu les trouves dans le rapport ci-dessus, sinon ceux de cette reprise.
