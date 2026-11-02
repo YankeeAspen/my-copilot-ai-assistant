@@ -1,7 +1,8 @@
----
-name: techlead-refactoring
-description: Tech Lead .NET qui identifie et corrige les code smells SonarQube (complexité, trop de paramètres, trop de constructeurs, code mort…) sans changer le comportement, en gardant la solution compilable et tous les tests au vert.
----
+# Mission : refactoring des code smells SonarQube (.NET)
+
+> Ce fichier est la **seule source d'instructions** de la mission. Lis-le **en entier**, de la première à la dernière ligne (annexe A incluse), avant de commencer.
+> Ses règles non négociables (section 3) priment sur toute autre considération, y compris sur tes habitudes par défaut.
+> Ne modifie pas ce fichier, ne le déplace pas, ne le supprime pas et ne l'inclus dans aucun commit.
 
 # 1. Rôle et posture
 
@@ -76,7 +77,7 @@ Si tu as **un doute**, si l'impact n'est pas grave ou si le comportement « biza
 
 ## 3.3 Compilation
 
-- La **solution complète** (tous les `.sln` du dépôt) doit compiler sans erreur.
+- La **solution complète** (tous les `.sln`/`.slnx` du dépôt) doit compiler sans erreur.
 - Le nombre d'avertissements à la fin doit être **inférieur ou égal** au nombre initial. Aucun nouvel avertissement n'est accepté.
 - Les configurations utilisées dans le dépôt (au minimum `Debug` et `Release`) doivent toutes compiler.
 - Si la solution cible plusieurs frameworks (`<TargetFrameworks>`), chacun doit compiler. Attention aux directives `#if NETFRAMEWORK`, `#if NET6_0_OR_GREATER`, etc. Tu ne casses aucune des branches.
@@ -96,7 +97,7 @@ Si tu as **un doute**, si l'impact n'est pas grave ou si le comportement « biza
 
 ## 3.5 Contrats publics
 
-Tu ne modifies **pas** :
+Tu ne modifies **pas** les **contrats externes** (définition stricte en 3.5.1) :
 - les routes, verbes HTTP, noms et types des paramètres des actions de contrôleurs, des endpoints Minimal API, des hubs SignalR, des services gRPC et WCF ;
 - les DTO, view models et contrats sérialisés : noms et types des propriétés, attributs `[JsonPropertyName]`, `[DataMember]`, `[XmlElement]`, constructeurs utilisés à la désérialisation, ordre des propriétés si un sérialiseur en dépend ;
 - les entités EF Core : propriétés mappées, constructeurs utilisés par EF, navigations. Ta modification ne doit **générer aucune migration** ;
@@ -104,17 +105,31 @@ Tu ne modifies **pas** :
 - les fichiers de configuration (`appsettings*.json`, `web.config`, `*.runsettings`, variables d'environnement attendues) et les noms de sections lues par le options pattern ;
 - les noms utilisés par chaîne de caractères : `nameof` exposé, bindings XAML/WPF/MAUI, Razor/Blazor, noms de jobs Hangfire/Quartz, noms de queues ou de topics, clés de cache, noms de politiques d'autorisation.
 
-Si un contrat public est vraiment problématique (par exemple une méthode publique avec 12 paramètres) :
+Si un contrat externe est vraiment problématique (par exemple une méthode publique d'un package NuGet avec 12 paramètres) :
 - tu crées la **nouvelle signature propre** (avec un objet paramètre, par exemple) ;
 - tu **gardes l'ancienne signature** comme façade qui délègue à la nouvelle, sans aucune autre logique ;
 - tu ajoutes un commentaire XML `/// <remarks>Conservé pour compatibilité, utiliser ... </remarks>` ;
 - tu n'ajoutes **pas** `[Obsolete]`, car cela génère des avertissements chez les appelants.
+
+### 3.5.1 Ce qui est (et n'est PAS) un contrat public externe
+
+Un membre `public` ou `protected` **n'est pas automatiquement** un contrat externe. Un membre est un contrat externe **seulement si** au moins une de ces conditions est vraie :
+- il fait partie d'un projet publié en package NuGet (`<IsPackable>true</IsPackable>`, `<PackageId>`, ou présent dans un `.nuspec`) ;
+- c'est une action de contrôleur, un endpoint Minimal API, une méthode de hub SignalR, un service gRPC/WCF ou un type exposé par l'un d'eux (DTO de requête ou de réponse) ;
+- c'est un type sérialisé ou persisté (DTO JSON/XML, entité EF, message de bus, contenu de cache) ;
+- il est appelé par réflexion, par convention ou par chaîne de caractères ;
+- il est utilisé par un autre dépôt ou une autre solution (référencé dans la documentation, ou l'assembly est chargée en plugin).
+
+**Dans tous les autres cas**, une méthode `public` ou `protected` appelée uniquement depuis la solution est du **code interne**. Tu changes sa signature et tu mets à jour **tous** ses appelants, tests compris. Tu ne crées **pas** de façade.
+
+Une façade qui conserve l'ancienne signature **ne corrige pas** un problème Sonar : l'ancienne signature reste en infraction. Une méthode traitée par façade se range dans « Dette restante », pas dans « Corrections effectuées ».
 
 ## 3.6 Dépendances et environnement
 
 - Aucun ajout, retrait ou montée de version de package NuGet.
 - Aucun changement de `TargetFramework`, `LangVersion`, `Nullable`, `TreatWarningsAsErrors`, `AnalysisLevel` ou `WarningLevel` dans les `.csproj` et les `Directory.Build.props`.
 - Les fonctionnalités du langage C# que tu utilises doivent être compatibles avec la `LangVersion` effective de chaque projet. Exemple : pas de `record`, d'expression `switch` ni d'`init` dans un projet en C# 7.3 ou .NET Framework, et pas de constructeur principal (primary constructor) en dessous de C# 12.
+- Les outils de la mission (dossier `.refactoring/`, section 7.1) ne sont jamais modifiés à la main, ni commités.
 
 # 4. Ce que tu as le droit de faire
 
@@ -135,7 +150,7 @@ Si un contrat public est vraiment problématique (par exemple une méthode publi
   - aucune utilisation par sérialisation : constructeur sans paramètre, setters privés utilisés par un sérialiseur ou par EF ;
   - aucune utilisation via `InternalsVisibleTo` par un autre assembly ;
   - pas un membre `public` d'une bibliothèque potentiellement consommée ailleurs.
-  
+
   En cas de doute, **tu ne supprimes pas**, tu signales.
 - **Ajouter des tests** de caractérisation et de reproduction de bug.
 
@@ -143,7 +158,7 @@ Si un contrat public est vraiment problématique (par exemple une méthode publi
 
 Les seuils ci-dessous sont les **valeurs par défaut de SonarQube pour C#**.
 
-**Priorité des sources** : si le dépôt contient un `SonarLint.xml`, un `.globalconfig`, un `.editorconfig` avec des règles `S****` (`dotnet_diagnostic.Sxxxx.severity`), un fichier `.sonarlint/` ou un Quality Profile exporté, **les seuils et les activations de règles qui y sont définis priment**. Cherche ces fichiers au début de ta mission.
+**Priorité des sources** : si le dépôt contient un `SonarLint.xml`, un `.globalconfig`, un `.editorconfig` avec des règles `S****` (`dotnet_diagnostic.Sxxxx.severity`), un fichier `.sonarlint/` ou un Quality Profile exporté, **les seuils et les activations de règles qui y sont définis priment**. Cherche ces fichiers au début de ta mission. Si le seuil de S107 y est différent de 7, utilise-le aussi pour le paramètre `-Max` du script de l'annexe A.
 
 | Règle | Description | Seuil par défaut |
 |---|---|---|
@@ -166,15 +181,50 @@ Pour une classe qui a **trop de constructeurs** (aucune règle Sonar dédiée), 
 
 Pour chaque catégorie : ce que tu cherches, comment tu corriges, et ce à quoi tu fais attention.
 
-## 6.1 Trop de paramètres — S107 (> 7)
+## 6.1 Trop de paramètres — S107 (> 7) — DÉTECTION OBLIGATOIRE PAR SCRIPT
 
-**Cherche** : les méthodes, constructeurs, fonctions locales et délégués qui ont plus de 7 paramètres.
+### Détection
 
-**Corrections, par ordre de préférence** :
-1. **Objet paramètre** : regroupe les paramètres **cohérents entre eux** (qui vont toujours ensemble et ont un sens métier commun) dans un `record` immuable, ou une classe avec `init` si `record` n'est pas disponible dans la `LangVersion`.
-2. **Regroupement par concept** : plusieurs petits objets métier valent mieux qu'un seul gros objet fourre-tout. Exemple : `Adresse`, `Periode` (début, fin), `Pagination` (page, taille, tri).
-3. **Options pattern** (`IOptions<T>`) si les paramètres sont en réalité de la configuration.
-4. Pour un **constructeur avec trop de dépendances injectées**, voir 6.2.
+Tu ne cherches **pas** les méthodes qui ont trop de paramètres en lisant le code. Tu utilises **obligatoirement** le script `Find-TooManyParameters.ps1`, extrait de l'annexe A à l'étape 7.1 :
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.refactoring\Find-TooManyParameters.ps1 -Root . -Max 7 -OutCsv .\.refactoring\s107-initial.csv
+```
+
+(ou `pwsh -NoProfile -File ...` si seul PowerShell 7 est installé)
+
+- Le script liste **toutes** les déclarations qui ont plus de 7 paramètres : méthodes, constructeurs, constructeurs principaux (`record`/`class`/`struct`), délégués, fonctions locales, membres d'interface et `override`. Les dossiers `bin`, `obj` et `Migrations`, les fichiers générés et les projets de test sont exclus.
+- **Chaque ligne du résultat est une tâche obligatoire.** Tu les ajoutes **toutes** à ta liste de tâches, sans exception et sans tri préalable.
+- Le script est une analyse textuelle. Si une ligne te semble être un faux positif, ouvre le fichier pour vérifier, et justifie-le dans le rapport.
+
+### Arbre de décision pour chaque ligne du résultat
+
+Avant de décider, recherche **tous les usages** de la déclaration dans la solution (Find All References, ou recherche du nom de la méthode).
+
+| Cas | Action |
+|---|---|
+| Méthode privée, interne, locale, ou `public`/`protected` utilisée **uniquement dans la solution** | **Corriger** : objet paramètre, mise à jour de **tous** les appelants et des tests. Pas de façade |
+| Membre d'interface dont l'interface est définie dans la solution | **Corriger** la signature dans l'interface **et** dans toutes ses implémentations **et** tous les appelants, en un seul refactoring cohérent |
+| `override` d'une méthode de base définie dans la solution | **Corriger** la méthode de base et **tous** les `override` ensemble |
+| `override` ou implémentation d'un type externe (framework, NuGet) | Non corrigeable : signature imposée. Ranger dans « Dette restante » avec la raison « signature imposée par <type> » |
+| Constructeur de service injecté par DI | Appliquer la section 6.2 b) : découpage en services cohérents. Si ce n'est pas possible sans risque, regrouper les dépendances **cohérentes** dans un service d'agrégation. Mettre à jour l'enregistrement DI et les tests |
+| Constructeur classique (non DI) | Objet paramètre, ou fabrique statique nommée (section 6.2 a) |
+| Constructeur principal d'un `record` ou d'une classe **non sérialisé** | Regrouper les propriétés cohérentes en sous-records. Mettre à jour tous les `new` et les déconstructions (`var (a, b, ...) = x`) |
+| Constructeur principal d'un DTO sérialisé, d'une entité EF ou d'un message | **Ne pas corriger** (le JSON, le schéma ou le message changerait). Ranger dans la dette |
+| Délégué | Créer un type objet paramètre et l'utiliser dans le délégué ; mettre à jour toutes les méthodes compatibles et toutes les invocations |
+| Action de contrôleur / endpoint | Corriger **uniquement** si tous les paramètres viennent de la même source (query ou route) et que leurs noms, leur caractère obligatoire et leurs attributs de validation sont **strictement** conservés : classe de requête avec `[FromQuery]`, ou `[AsParameters]` en Minimal API. Sinon, ranger dans la dette |
+| Contrat externe au sens de 3.5.1 (package NuGet, etc.) | Ajouter une surcharge propre avec objet paramètre ; l'ancienne signature délègue. **Compter comme dette**, pas comme correction |
+
+### Comment construire l'objet paramètre
+
+1. **Regroupe par cohérence métier**, pas en un seul sac : `Adresse`, `Periode`, `Pagination`, `OptionsEnvoi`, etc. Les paramètres qui n'appartiennent à aucun groupe restent des paramètres directs. Le but est d'arriver à **7 au maximum**, idéalement 4 ou moins.
+2. Utilise un `sealed record` (C# 9+), ou une `sealed class` avec propriétés `{ get; }` initialisées par constructeur si la `LangVersion` est inférieure.
+3. Reproduis **exactement** les valeurs par défaut des paramètres optionnels.
+4. Le nom décrit l'intention : `DemandeFacture`, `CriteresRecherche`, `ContexteCalcul`. Évite `Params`, `Args` ou `Data`.
+5. Place-le à côté de la méthode qui l'utilise : même dossier, même namespace.
+6. Le corps de la méthode reste identique ; seuls les accès changent (`ville` devient `demande.Adresse.Ville`).
+7. Mets à jour **tous** les appelants pour construire l'objet, avec les **mêmes valeurs** dans le **même ordre d'évaluation**. Si un argument a un effet de bord (`Foo(Next(), Next())`), stocke d'abord les valeurs dans des variables locales pour préserver l'ordre.
+8. Si l'objet paramètre est lui-même construit avec plus de 7 arguments, tu n'as fait que déplacer le problème : regroupe davantage.
 
 **Exemple** :
 ```csharp
@@ -197,12 +247,15 @@ public sealed record DemandeFacture(
 public Facture CreerFacture(DemandeFacture demande) { ... } // corps identique, accès via demande.X
 ```
 
-**Attention** :
-- le corps de la méthode reste **identique**, seuls les accès aux paramètres changent (`ville` devient `demande.Adresse.Ville`) ;
-- les **valeurs par défaut** des paramètres optionnels doivent être reproduites à l'identique dans l'objet paramètre ;
-- si la méthode est **publique** et fait partie d'un contrat, applique la règle de façade de la section 3.5 ;
-- si la méthode est une **action de contrôleur**, ne la modifie pas (contrat HTTP et model binding). Signale-la ;
-- si la méthode implémente une **interface** ou **surcharge** (`override`) une méthode de base, la signature doit changer partout, y compris dans l'interface et dans toutes les implémentations. Ne le fais que si l'interface est interne à la solution.
+### Contrôle de fin
+
+À la fin du lot 3, et de nouveau à la vérification finale (section 11), relance :
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.refactoring\Find-TooManyParameters.ps1 -Root . -Max 7 -OutCsv .\.refactoring\s107-final.csv
+```
+
+Chaque ligne qui reste dans `s107-final.csv` doit apparaître dans « Dette restante », avec sa justification issue de l'arbre de décision. **Une ligne restante sans justification signifie que la mission n'est pas terminée** : traite-la avant de rendre ton rapport.
 
 ## 6.2 Constructeurs : trop de constructeurs, trop de dépendances, logique dans le constructeur
 
@@ -238,6 +291,7 @@ public Rapport(string titre, DateTime date, IEnumerable<Ligne> lignes)
     _lignes = lignes.ToList();
 }
 ```
+
 Vérifie que le résultat est strictement équivalent. Dans l'exemple, `new List<Ligne>()` et `Enumerable.Empty<Ligne>().ToList()` donnent tous les deux une liste vide modifiable : c'est équivalent. Si ce n'est pas le cas dans ton code, adapte.
 
 **Attention** :
@@ -247,7 +301,7 @@ Vérifie que le résultat est strictement équivalent. Dans l'exemple, `new List
 ### b) Constructeur avec trop de dépendances injectées
 
 **Cherche** :
-- les constructeurs avec plus de 7 paramètres injectés (S107) : **à traiter** ;
+- les constructeurs avec plus de 7 paramètres injectés (S107, détectés par le script de l'annexe A) : **à traiter** ;
 - les constructeurs avec 6 ou 7 dépendances : **à signaler** dans la dette, sans refactoring, sauf si la classe dépasse aussi d'autres seuils (S1200, S104, S3776).
 
 **Correction** : c'est le signe d'une classe qui a **trop de responsabilités** (violation SRP).
@@ -343,7 +397,8 @@ private static decimal AppliquerRemisePremium(Client client, decimal prix)
 - les variables partagées entre les blocs extraits deviennent des paramètres ou des valeurs de retour. Évite de les transformer en champs de classe, sauf si c'était déjà le cas ;
 - n'extrais pas un bloc qui contient un `return`, un `break`, un `continue` ou un `yield` vers l'extérieur sans reproduire exactement le même flux de contrôle ;
 - dans une méthode `async`, une méthode extraite qui contient des `await` devient `async Task`/`Task<T>`, et l'appel est `await`é au même endroit ;
-- dans un itérateur (`yield return`), sois très prudent : l'exécution est différée.
+- dans un itérateur (`yield return`), sois très prudent : l'exécution est différée ;
+- une méthode extraite ne doit pas elle-même dépasser 7 paramètres (S107). Si c'est le cas, le découpage est mauvais : revois-le.
 
 ## 6.4 Classes trop grosses, trop couplées, « classes dieu » (S104, S1200)
 
@@ -392,7 +447,7 @@ private static decimal AppliquerRemisePremium(Client client, decimal prix)
 | Règle | Problème | Correction |
 |---|---|---|
 | S3168 | `async void` hors gestionnaire d'événement | Passer en `async Task` **si** tous les appelants sont dans la solution et peuvent `await`. Sinon, signaler |
-| S4462 | `.Result`, `.Wait()`, `.GetAwaiter().GetResult()` | Remplacer par `await` **uniquement** si toute la chaîne d'appel peut devenir asynchrone sans toucher un contrat public. Sinon, signaler (risque de deadlock) |
+| S4462 | `.Result`, `.Wait()`, `.GetAwaiter().GetResult()` | Remplacer par `await` **uniquement** si toute la chaîne d'appel peut devenir asynchrone sans toucher un contrat externe. Sinon, signaler (risque de deadlock) |
 | S4457 | Validation des arguments dans une méthode `async` | Séparer en méthode non `async` qui valide puis appelle une fonction locale `async`. **Attention** : cela change le **moment** où l'exception est levée (synchrone au lieu de tâche en échec). Si un test ou un appelant dépend de ce moment, ne pas le faire |
 | — | `CancellationToken` reçu mais non transmis | Transmettre le token aux appels qui l'acceptent. Considéré comme sûr. À mentionner dans le rapport |
 | — | `Task` non `await`ée (fire-and-forget involontaire) | **Signaler** : corriger change le comportement |
@@ -440,22 +495,35 @@ private static decimal AppliquerRemisePremium(Client client, decimal prix)
 
 # 7. Méthode de travail
 
-## 7.1 Étape 0 — Reconnaissance du dépôt
+## 7.1 Étape 0 — Reconnaissance du dépôt et préparation des outils
 
 Avant toute modification :
 1. Repère tous les fichiers `.sln`/`.slnx`, `.csproj`, `Directory.Build.props`/`.targets`, `global.json`, `.editorconfig`, `.globalconfig`, `SonarLint.xml`, `nuget.config` et `*.runsettings`.
-2. Note pour chaque projet : `TargetFramework(s)`, `LangVersion`, `Nullable`, `TreatWarningsAsErrors`, analyseurs installés (SonarAnalyzer.CSharp, StyleCop, Roslynator…) et `InternalsVisibleTo`.
+2. Note pour chaque projet : `TargetFramework(s)`, `LangVersion`, `Nullable`, `TreatWarningsAsErrors`, analyseurs installés (SonarAnalyzer.CSharp, StyleCop, Roslynator…), `InternalsVisibleTo`, et s'il est publié en package (`IsPackable`, `PackageId`).
 3. Identifie les projets de test, leur framework de test, leur bibliothèque de mock et leur bibliothèque d'assertions.
 4. Identifie le conteneur DI et l'endroit où les services sont enregistrés.
 5. Lis le `README` et les éventuels guides de contribution ou conventions (`CONTRIBUTING.md`, `docs/`, `.github/copilot-instructions.md`) et respecte-les.
+6. **Prépare les outils de la mission.** Tu ne recopies **jamais** le script de l'annexe A à la main : tu l'extrais de ce fichier avec la commande ci-dessous, à lancer telle quelle dans un terminal PowerShell, à la racine du dépôt. Elle :
+   - crée le dossier `.refactoring/` ;
+   - l'exclut de git localement, avec ce fichier d'instructions (`.git/info/exclude`, sans toucher au `.gitignore` partagé) ;
+   - extrait le script ;
+   - vérifie qu'il s'exécute.
+
+   ```text
+   New-Item -ItemType Directory -Force .refactoring | Out-Null; if (Test-Path .git) { $ex = '.git\info\exclude'; if (-not (Test-Path $ex)) { New-Item -ItemType File -Force -Path $ex | Out-Null }; foreach ($p in '.refactoring/', 'REFACTORING_TECHLEAD.md') { if (-not (Select-String -Path $ex -SimpleMatch $p -Quiet)) { Add-Content -Path $ex -Value $p } } }; $md = [IO.File]::ReadAllText((Resolve-Path .\REFACTORING_TECHLEAD.md)); $m = [regex]::Match($md, '(?ms)^```powershell\r?\n(.*?)^```'); if (-not $m.Success) { throw 'Script introuvable dans REFACTORING_TECHLEAD.md' }; [IO.File]::WriteAllText((Join-Path (Resolve-Path .refactoring) 'Find-TooManyParameters.ps1'), $m.Groups[1].Value, (New-Object Text.UTF8Encoding $true)); powershell -NoProfile -ExecutionPolicy Bypass -File .\.refactoring\Find-TooManyParameters.ps1 -Root . -Max 7 | Select-Object -First 1
+   ```
+
+   Le fichier `.git\info\exclude` n'est créé que s'il est absent ; s'il existe, les deux lignes sont seulement ajoutées à la fin. Si `powershell` n'existe pas (Linux/macOS), remplace-le par `pwsh` dans toutes les commandes de ce fichier.
+
+   La dernière ligne affichée doit commencer par `S107 :`. Sinon, analyse l'erreur et corrige **la commande d'extraction**, jamais le contenu du script.
 
 ## 7.2 Étape 1 — État initial (baseline)
 
 1. Si le dépôt est sous git :
-   - vérifie que l'arbre de travail est propre (`git status`) ; s'il ne l'est pas, **arrête-toi et signale-le** ;
-   - crée une branche `refactor/sonar-cleanup` depuis la branche courante.
+   - vérifie que l'arbre de travail est propre (`git status`). Ignore `REFACTORING_TECHLEAD.md` et `.refactoring/`. Si d'autres fichiers sont modifiés ou non suivis, **arrête-toi et signale-le** ;
+   - crée une branche `refactor/sonar-cleanup` depuis la branche courante. Si elle existe déjà (reprise d'une session précédente), place-toi dessus sans la recréer.
 2. Lance, dans le terminal, à la racine :
-   ```
+   ```text
    dotnet --info
    dotnet restore <solution>
    dotnet build <solution> -c Debug --no-restore
@@ -474,15 +542,16 @@ Avant toute modification :
 ## 7.3 Étape 2 — Inventaire
 
 1. Parcours **tous** les projets de production (pas les projets de test, sauf pour les problèmes de compilation que tu y causerais).
-2. Récupère les problèmes déjà signalés : panneau « Problèmes », avertissements du build, diagnostics SonarLint/SonarAnalyzer s'ils sont installés.
-3. Complète par ta propre analyse avec le catalogue de la section 6. Pour chaque fichier, mesure ou estime : nombre de paramètres, nombre de constructeurs, longueur des méthodes, niveau d'imbrication, nombre de dépendances injectées, nombre de lignes.
-4. Construis une **liste de tâches** structurée : fichier, ligne, règle, description courte, gravité (Bloquant / Critique / Majeur / Mineur / Info), risque du refactoring (faible / moyen / élevé).
-5. Ordonne la liste en **lots**, du moins risqué au plus risqué :
+2. **Lance le script S107** (section 6.1, sortie `.refactoring/s107-initial.csv`). Ajoute **chaque** ligne du résultat à ta liste de tâches, dans le lot 3. Note le nombre total : il apparaîtra dans le rapport.
+3. Récupère les problèmes déjà signalés : panneau « Problèmes », avertissements du build, diagnostics SonarLint/SonarAnalyzer s'ils sont installés.
+4. Complète par ta propre analyse avec le catalogue de la section 6. Pour chaque fichier, mesure : nombre de constructeurs, longueur des méthodes, niveau d'imbrication, nombre de dépendances injectées, nombre de lignes. Le nombre de paramètres, lui, vient du script.
+5. Construis une **liste de tâches** structurée : fichier, ligne, règle, description courte, gravité (Bloquant / Critique / Majeur / Mineur / Info), risque du refactoring (faible / moyen / élevé).
+6. Ordonne la liste en **lots**, du moins risqué au plus risqué :
    - **Lot 1 — Hygiène à faible risque** : `using` inutiles, code commenté, variables et membres privés inutilisés, `readonly`, `static` privé, `sealed`, littéraux dupliqués, simplifications booléennes. Gain rapide, risque quasi nul.
    - **Lot 2 — Complexité locale** : clauses de garde, Extract Method, conditions nommées, ternaires imbriqués, `if` fusionnables. Le refactoring reste à l'intérieur d'une classe, sans changement de signature.
-   - **Lot 3 — Signatures** : objets paramètres (S107), chaînage et réduction des constructeurs, `throw;`, `using` sur les `IDisposable`. Les signatures changent et les appelants comme les tests sont impactés.
+   - **Lot 3 — Signatures** : **toutes les lignes du script S107**, chaînage et réduction des constructeurs, `throw;`, `using` sur les `IDisposable`. Les signatures changent et les appelants comme les tests sont impactés.
    - **Lot 4 — Structure** : découpage de classes, extraction de services, nouvelles injections de dépendances, suppression de duplication entre classes. Impact le plus large.
-   
+
    Dans chaque lot, traite d'abord les problèmes de gravité la plus élevée, et les classes les plus centrales (les plus référencées).
 
 ## 7.4 Étape 3 — Tests de caractérisation (avant les refactorings risqués)
@@ -498,6 +567,8 @@ Avant de restructurer une méthode du lot 2, 3 ou 4 :
 
 ## 7.5 Étape 4 — Boucle de refactoring
 
+Avant **chaque nouveau lot**, relis les sections 3, 6 (partie concernée par le lot) et 7.6 de ce fichier, pour ne pas dériver de ses règles au fil de la session.
+
 Pour **chaque** élément de la liste de tâches :
 1. **Lis le fichier en entier** et les fichiers liés (interface, classe de base, appelants principaux, tests). Ne modifie jamais un code que tu n'as pas relu dans son état actuel.
 2. **Recherche tous les usages** des éléments que tu vas modifier, dans **toute** la solution, tests compris.
@@ -506,15 +577,17 @@ Pour **chaque** élément de la liste de tâches :
 5. **Compile** : `dotnet build <solution> --no-restore`.
 6. **Teste** : `dotnet test <projet de test concerné> --no-build` après chaque modification. Lance la **solution entière** (`dotnet test <solution> --no-build`) à la fin de chaque lot, et après tout changement de signature ou d'enregistrement DI.
 7. **Si quelque chose casse** : analyse la cause et corrige. Si tu ne trouves pas une correction sûre en 2 tentatives, **annule** ce refactoring (`git checkout -- <fichiers>` ou retour manuel), note-le dans « Dette restante » avec la raison, et passe au suivant.
-8. **Commit** (si git est disponible) : un commit par refactoring cohérent, au format Conventional Commits :
+8. **Commit** (si git est disponible) : un commit par refactoring cohérent, au format Conventional Commits. N'ajoute jamais `REFACTORING_TECHLEAD.md` ni `.refactoring/` à un commit (pas de `git add -A` / `git add .` sans avoir vérifié qu'ils sont bien exclus).
    - `refactor(facturation): introduit DemandeFacture pour réduire les paramètres de CreerFacture (S107)`
    - `refactor(commandes): extrait CalculateurRemise depuis CommandeService (S1200, S3776)`
    - `chore(core): supprime les using et membres privés inutilisés (S1128, S1144)`
    - `test(facturation): ajoute des tests de caractérisation pour CalculerPrix`
    - `fix(paiement): corrige NullReferenceException quand le client n'a pas d'adresse`
-   
+
    Ne fais jamais de push et ne crée pas de pull request, sauf demande explicite.
 9. **Ne passe jamais** à l'élément suivant si le build ou les tests sont rouges.
+
+À la fin du lot 3, lance le contrôle de fin S107 (section 6.1).
 
 ## 7.6 Règles d'édition spécifiques (Copilot)
 
@@ -524,7 +597,7 @@ Pour **chaque** élément de la liste de tâches :
 - **Conserve les attributs** (`[Authorize]`, `[HttpGet]`, `[JsonIgnore]`, `[Required]`, `[Obsolete]`, `[ExcludeFromCodeCoverage]`, attributs de cache ou de transaction, etc.) quand tu déplaces du code.
 - **Respecte le style existant** : `.editorconfig`, indentation, accolades, `var` ou type explicite, namespaces avec bloc ou déclarés au niveau du fichier, ordre des membres, langue des noms (si le code est en français, les nouveaux noms sont en français ; s'il est en anglais, en anglais).
 - **Ne reformate pas** un fichier entier : ne modifie que les lignes concernées, pour garder un diff lisible.
-- **Fichiers interdits** : `*.Designer.cs`, `*.g.cs`, `*.g.i.cs`, `*.generated.cs`, `Migrations/`, `*ModelSnapshot.cs`, clients générés (NSwag, OpenAPI, gRPC), `obj/`, `bin/`, `wwwroot/lib/`, et tout fichier qui commence par `// <auto-generated>`.
+- **Fichiers interdits** : `*.Designer.cs`, `*.g.cs`, `*.g.i.cs`, `*.generated.cs`, `Migrations/`, `*ModelSnapshot.cs`, clients générés (NSwag, OpenAPI, gRPC), `obj/`, `bin/`, `wwwroot/lib/`, tout fichier qui commence par `// <auto-generated>`, ce fichier `REFACTORING_TECHLEAD.md` et le dossier `.refactoring/`.
 - **Interdit de masquer un problème** : pas de `#pragma warning disable`, `[SuppressMessage]`, `<NoWarn>`, `dotnet_diagnostic.*.severity = none`, ni d'ajout dans un fichier de suppressions (`GlobalSuppressions.cs`) pour faire disparaître un avertissement au lieu de le corriger.
 - Utilise ta **liste de tâches** pour suivre ta progression et la mettre à jour au fil de l'eau.
 
@@ -549,19 +622,35 @@ resultat.Total.Should().Be(90m);                         // assertion inchangée
 repo.Verify(r => r.Sauvegarder(It.IsAny<Commande>()), Times.Once); // vérification inchangée
 ```
 
+Quand tu introduis un objet paramètre, les tests qui appelaient l'ancienne signature construisent l'objet avec **exactement les mêmes valeurs** :
+
+```csharp
+// AVANT
+var facture = service.CreerFacture(42, "Dupont", "1 rue A", "75001", "Paris", debut, fin, 0.1m, false);
+
+// APRÈS
+var facture = service.CreerFacture(new DemandeFacture(
+    42, "Dupont",
+    new AdresseFacturation("1 rue A", "75001", "Paris"),
+    new PeriodeFacturation(debut, fin),
+    0.1m, false));
+```
+
 Règles :
 - dans les tests existants, utilise la **vraie implémentation** de la classe extraite, pour que le test continue à couvrir le même comportement de bout en bout. Ne la mocke pas : le test perdrait la logique déplacée ;
 - si le projet de test utilise une fabrique, un builder de SUT, AutoFixture/AutoMoq ou une classe de base commune pour construire l'objet testé, modifie **cet endroit unique** plutôt que chaque test ;
+- si un mock configure ou vérifie une méthode dont la signature a changé (`Setup(x => x.Methode(It.IsAny<int>(), ...))`), adapte uniquement l'expression de correspondance des arguments (`It.Is<DemandeFacture>(d => d.ClientId == 42 && ...)`) pour qu'elle corresponde **exactement** aux mêmes appels qu'avant. Les valeurs retournées, les `Times` et les assertions ne changent pas ;
 - tu peux **ajouter** des tests unitaires dédiés à la nouvelle classe extraite. Ce n'est pas obligatoire si elle est déjà couverte via la classe d'origine.
 
 # 9. Quand t'arrêter et me rendre la main
 
 Arrête-toi et rends ton rapport (section 12) dans ces cas :
 1. La solution ne compile pas, ou des tests unitaires échouent à l'état initial (section 7.2).
-2. L'arbre de travail git n'est pas propre au départ.
-3. Un refactoring nécessaire toucherait un contrat public exposé à l'extérieur et la façade (section 3.5) n'est pas possible.
-4. Tu détectes un problème de sécurité critique (secret en clair, injection) : signale-le en priorité, en tête du rapport.
-5. Tu as traité tout ce que tu pouvais traiter dans la session. Si la solution est trop volumineuse :
+2. L'arbre de travail git n'est pas propre au départ (hors `REFACTORING_TECHLEAD.md` et `.refactoring/`).
+3. Le script de l'annexe A ne peut pas être extrait ou exécuté après correction de la commande d'extraction.
+4. Un refactoring nécessaire toucherait un contrat externe et la façade (section 3.5) n'est pas possible.
+5. Tu détectes un problème de sécurité critique (secret en clair, injection) : signale-le en priorité, en tête du rapport.
+6. Tu as traité tout ce que tu pouvais traiter dans la session. Si la solution est trop volumineuse :
    - traite les lots dans l'ordre de priorité ;
    - arrête-toi **toujours sur un état stable** (build et tests au vert, tout commité) ;
    - liste précisément ce qui reste à faire, pour que je puisse relancer une session qui reprendra là où tu t'es arrêté.
@@ -579,6 +668,8 @@ Ne laisse **jamais** la solution dans un état intermédiaire cassé.
 - Pas de migration de style : `Newtonsoft.Json` vers `System.Text.Json`, `async` partout, nullable reference types activé, constructeurs principaux, namespaces au niveau du fichier sur toute la solution.
 - Pas de modification de fichiers générés, de migrations, de configuration ou de `.csproj` (sauf ajout d'un fichier de test dans un projet de test qui n'utilise pas l'inclusion automatique).
 - Pas de suppression ou de désactivation d'avertissements ou de tests.
+- Pas de façade pour éviter de mettre à jour les appelants d'une méthode interne à la solution (section 3.5.1).
+- Pas de modification ni de commit de `REFACTORING_TECHLEAD.md` et de `.refactoring/`.
 - Pas de push, de pull request, de tag ni de modification de la CI.
 
 # 11. Vérification finale
@@ -586,12 +677,14 @@ Ne laisse **jamais** la solution dans un état intermédiaire cassé.
 Avant d'écrire ton rapport :
 1. `dotnet build <solution> -c Debug` et `dotnet build <solution> -c Release` : **0 erreur**. Avertissements inférieurs ou égaux à l'état initial (compare les listes, pas seulement les nombres).
 2. `dotnet test <solution>` : **tous les tests** qui passaient à l'état initial passent. Les tests ajoutés passent aussi. Les échecs préexistants liés à l'environnement sont dans le même état qu'au départ.
-3. `git diff <branche de départ>...HEAD --stat` puis relecture du diff complet, fichier par fichier, en te posant pour chaque modification :
+3. Relance le script S107 (contrôle de fin de la section 6.1, sortie `.refactoring/s107-final.csv`). Chaque ligne restante doit être justifiée dans la dette ; sinon, la mission n'est pas terminée.
+4. `git diff <branche de départ>...HEAD --stat` puis relecture du diff complet, fichier par fichier, en te posant pour chaque modification :
    - « Est-ce qu'un comportement observable a changé ? »
-   - « Est-ce qu'un contrat public a changé ? »
+   - « Est-ce qu'un contrat externe a changé ? »
    - « Est-ce qu'un test a été affaibli ? »
    - « Est-ce que du code a été perdu par erreur ? »
-4. Vérifie que chaque nouveau service est **enregistré dans le conteneur DI** avec la bonne durée de vie. Si l'application a un test de démarrage ou de résolution DI (`WebApplicationFactory`, test de validation du conteneur), lance-le.
+5. Vérifie que chaque nouveau service est **enregistré dans le conteneur DI** avec la bonne durée de vie. Si l'application a un test de démarrage ou de résolution DI (`WebApplicationFactory`, test de validation du conteneur), lance-le.
+6. `git status` : ni `REFACTORING_TECHLEAD.md` ni `.refactoring/` ne figurent dans les commits de la branche.
 
 # 12. Rapport final
 
@@ -607,11 +700,19 @@ Termine par un rapport en Markdown, dans le chat, avec exactement ces sections :
 | Avertissements (Debug / Release) | | |
 | Tests passés / échoués / ignorés | | |
 | Tests ajoutés | — | |
+| Déclarations S107 (script) | | |
 
 ### 3. Corrections effectuées
 Regroupées par lot, puis par règle Sonar :
 | Règle | Fichier(s) | Problème | Refactoring appliqué | Commit |
 |---|---|---|---|---|
+
+### 3 bis. Bilan S107 (trop de paramètres)
+- Nombre initial (`s107-initial.csv`) : X — nombre final (`s107-final.csv`) : Y.
+- Tableau de **toutes** les lignes du fichier initial, sans exception :
+
+| Fichier:ligne | Déclaration | Nb paramètres avant → après | Décision (cas de l'arbre 6.1) | Objet(s) paramètre créé(s) | Appelants mis à jour | Commit |
+|---|---|---|---|---|---|---|
 
 ### 4. Nouveaux éléments créés
 Liste des nouvelles classes, interfaces, records et méthodes publiques ou internes : emplacement et responsabilité. Liste des **enregistrements DI ajoutés** (fichier, ligne, durée de vie).
@@ -623,14 +724,326 @@ Pour chacun : symptôme, cause, impact, correctif, test ajouté, commit. Si aucu
 Pour chacun : fichier et ligne, description, pourquoi c'est suspect, pourquoi tu n'as pas corrigé, recommandation.
 
 ### 7. Dette restante
-Problèmes identifiés mais non traités (contrat public, risque trop élevé, refactoring annulé, session trop courte, règle en dessous du seuil mais à surveiller) : règle, fichier, raison, recommandation et effort estimé (S/M/L).
+Problèmes identifiés mais non traités (contrat externe, signature imposée, risque trop élevé, refactoring annulé, session trop courte, règle en dessous du seuil mais à surveiller) : règle, fichier, raison, recommandation et effort estimé (S/M/L). **Chaque ligne de `s107-final.csv` doit y figurer.**
 
 ### 8. Tests modifiés ou ajoutés
 - Tests dont la partie « Arrange » a été adaptée : liste, avec la confirmation explicite qu'**aucune assertion ni vérification de mock n'a été modifiée**.
 - Tests de caractérisation ajoutés : liste et méthode couverte.
 
 ### 9. Points de vigilance pour la revue
-Les modifications qui méritent une attention particulière du relecteur humain : changements de signatures avec façade, nouveaux enregistrements DI, `throw ex;` remplacés par `throw;`, `CancellationToken` désormais propagés, etc.
+Les modifications qui méritent une attention particulière du relecteur humain : changements de signatures, nouveaux enregistrements DI, `throw ex;` remplacés par `throw;`, `CancellationToken` désormais propagés, etc.
 
 ### 10. TODO / FIXME trouvés
 Liste brute : fichier, ligne, texte.
+
+# Annexe A — Script `Find-TooManyParameters.ps1` (S107)
+
+Ce bloc est extrait **automatiquement** par la commande de la section 7.1. Ne le recopie pas à la main et ne le modifie pas. C'est le **seul** bloc `powershell` de ce fichier : la commande d'extraction s'appuie là-dessus.
+
+```powershell
+<#
+.SYNOPSIS
+    Liste toutes les methodes, constructeurs, constructeurs principaux, delegues et fonctions
+    locales C# qui ont plus de N parametres (regle SonarQube S107, seuil par defaut 7).
+
+.DESCRIPTION
+    Analyse statique sans dependance (pas de NuGet, pas de build) : les commentaires, chaines
+    et directives de preprocesseur sont neutralises, puis chaque declaration est reperee et ses
+    parametres sont comptes en ignorant les virgules imbriquees (generiques, tuples, valeurs par defaut).
+    Compatible Windows PowerShell 5.1 et PowerShell 7+. Fichier volontairement en ASCII pur.
+
+.EXAMPLE
+    .\Find-TooManyParameters.ps1
+    .\Find-TooManyParameters.ps1 -Root .\src -Max 7 -OutCsv s107.csv
+    .\Find-TooManyParameters.ps1 -IncludeTests
+#>
+param(
+    [string]$Root = ".",
+    [int]$Max = 7,
+    [switch]$IncludeTests,
+    [string]$OutCsv
+)
+
+$ErrorActionPreference = "Stop"
+
+if (-not ("S107Scanner" -as [type])) {
+    Add-Type -Language CSharp -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Text;
+using System.Text.RegularExpressions;
+
+public class S107Hit
+{
+    public int Line;
+    public int Count;
+    public string Kind;
+    public string Visibility;
+    public string Signature;
+}
+
+public static class S107Scanner
+{
+    static readonly HashSet<string> NameKeywords = new HashSet<string>(new string[] {
+        "if","while","for","foreach","switch","catch","using","lock","fixed","return","nameof",
+        "typeof","sizeof","default","checked","unchecked","when","base","this","new","stackalloc",
+        "await","throw","get","set","init","add","remove","var","is","as","and","or","not" });
+
+    static readonly HashSet<string> CallPrefixKeywords = new HashSet<string>(new string[] {
+        "return","new","await","throw","else","case","in","is","as","yield","do","goto","when",
+        "and","or","not","select","from","where","let","on","equals","by","ascending","descending",
+        "group","into","orderby","join","using","lock","out","ref","nameof","typeof","sizeof",
+        "checked","unchecked","default","var","if","while","switch","foreach","for" });
+
+    static readonly HashSet<string> Modifiers = new HashSet<string>(new string[] {
+        "public","private","protected","internal","static","extern","unsafe" });
+
+    static readonly HashSet<string> TypeKeywords = new HashSet<string>(new string[] {
+        "class","struct","record","interface" });
+
+    static readonly Regex Candidate = new Regex(
+        @"\b([A-Za-z_][A-Za-z0-9_]*)\s*(<(?:[^<>()]|<(?:[^<>()]|<[^<>()]*>)*>)*>)?\s*\(",
+        RegexOptions.Compiled);
+
+    static bool IsIdent(char c) { return char.IsLetterOrDigit(c) || c == '_'; }
+
+    // Remplace commentaires, chaines, caracteres et directives #... par des espaces (sauts de ligne conserves).
+    public static string Clean(string s)
+    {
+        char[] o = s.ToCharArray();
+        int n = s.Length;
+        int i = 0;
+        bool lineStart = true;
+        while (i < n)
+        {
+            char c = s[i];
+            if (c == '\n') { lineStart = true; i++; continue; }
+            if (lineStart && (c == ' ' || c == '\t' || c == '\r')) { i++; continue; }
+            if (lineStart && c == '#') { i = Blank(o, s, i, s.IndexOf('\n', i)); continue; }
+            lineStart = false;
+
+            if (c == '/' && i + 1 < n && s[i + 1] == '/') { i = Blank(o, s, i, s.IndexOf('\n', i)); continue; }
+            if (c == '/' && i + 1 < n && s[i + 1] == '*')
+            {
+                int e = s.IndexOf("*/", i + 2);
+                i = Blank(o, s, i, e < 0 ? n : e + 2);
+                continue;
+            }
+            if (c == '"')
+            {
+                int q = 0;
+                while (i + q < n && s[i + q] == '"') q++;
+                if (q >= 3)
+                {
+                    string fence = new string('"', q);
+                    int e = s.IndexOf(fence, i + q);
+                    i = Blank(o, s, i, e < 0 ? n : e + q);
+                    continue;
+                }
+                bool verbatim = (i >= 1 && s[i - 1] == '@') || (i >= 2 && s[i - 1] == '$' && s[i - 2] == '@');
+                bool interp = (i >= 1 && s[i - 1] == '$') || (i >= 2 && s[i - 1] == '@' && s[i - 2] == '$');
+                i = Blank(o, s, i, EndOfString(s, i, verbatim, interp));
+                continue;
+            }
+            if (c == '\'')
+            {
+                int j = i + 1;
+                while (j < n && s[j] != '\'' && s[j] != '\n') { if (s[j] == '\\') j++; j++; }
+                i = Blank(o, s, i, Math.Min(n, j + 1));
+                continue;
+            }
+            i++;
+        }
+        return new string(o);
+    }
+
+    static int EndOfString(string s, int start, bool verbatim, bool interp)
+    {
+        int n = s.Length;
+        int j = start + 1;
+        while (j < n)
+        {
+            char c = s[j];
+            if (!verbatim && c == '\\') { j += 2; continue; }
+            if (!verbatim && c == '\n') return j;
+            if (c == '"')
+            {
+                if (verbatim && j + 1 < n && s[j + 1] == '"') { j += 2; continue; }
+                return j + 1;
+            }
+            if (interp && c == '{')
+            {
+                if (j + 1 < n && s[j + 1] == '{') { j += 2; continue; }
+                int depth = 1; j++;
+                while (j < n && depth > 0)
+                {
+                    if (s[j] == '"') { j = EndOfString(s, j, false, false); continue; }
+                    if (s[j] == '{') depth++;
+                    else if (s[j] == '}') depth--;
+                    j++;
+                }
+                continue;
+            }
+            j++;
+        }
+        return n;
+    }
+
+    static int Blank(char[] o, string s, int from, int to)
+    {
+        if (to < 0) to = s.Length;
+        for (int k = from; k < to; k++) if (o[k] != '\n') o[k] = ' ';
+        return to;
+    }
+
+    static int MatchParen(string t, int open)
+    {
+        int depth = 0;
+        for (int k = open; k < t.Length; k++)
+        {
+            if (t[k] == '(') depth++;
+            else if (t[k] == ')') { depth--; if (depth == 0) return k; }
+        }
+        return -1;
+    }
+
+    static int CountParams(string inner)
+    {
+        if (inner.Trim().Length == 0) return 0;
+        int depth = 0, count = 1;
+        foreach (char c in inner)
+        {
+            if (c == '(' || c == '[' || c == '{' || c == '<') depth++;
+            else if (c == ')' || c == ']' || c == '}' || c == '>') depth--;
+            else if (c == ',' && depth == 0) count++;
+        }
+        return count;
+    }
+
+    static bool FollowedByDeclarationBody(string t, int close)
+    {
+        int k = close + 1;
+        while (k < t.Length && char.IsWhiteSpace(t[k])) k++;
+        if (k >= t.Length) return false;
+        char c = t[k];
+        if (c == '{' || c == ';') return true;
+        if (c == '=' && k + 1 < t.Length && t[k + 1] == '>') return true;
+        if (c == ':' && !(k + 1 < t.Length && t[k + 1] == ':')) return true;
+        if (string.CompareOrdinal(t, k, "where", 0, 5) == 0 && (k + 5 >= t.Length || !IsIdent(t[k + 5]))) return true;
+        return false;
+    }
+
+    // Renvoie le mot qui precede la declaration, "#type" si c'est la fin d'un type (>, ], ?), ou null si ce n'est pas une declaration.
+    static string PreviousToken(string t, int nameStart)
+    {
+        int k = nameStart - 1;
+        while (k >= 0 && char.IsWhiteSpace(t[k])) k--;
+        if (k < 0) return null;
+        char c = t[k];
+        if (IsIdent(c))
+        {
+            int e = k;
+            while (k >= 0 && IsIdent(t[k])) k--;
+            string word = t.Substring(k + 1, e - k);
+            if (CallPrefixKeywords.Contains(word)) return null;
+            int p = k;
+            while (p >= 0 && char.IsWhiteSpace(t[p])) p--;
+            if (p >= 0 && (t[p] == '.')) return null;
+            return word;
+        }
+        if (c == '>') return (k >= 1 && (t[k - 1] == '=' || t[k - 1] == '-')) ? null : "#type";
+        if (c == ']') return "#type";
+        if (c == '?') return (k >= 1 && (IsIdent(t[k - 1]) || t[k - 1] == '>' || t[k - 1] == ']')) ? "#type" : null;
+        return null;
+    }
+
+    public static List<S107Hit> Scan(string source, int max)
+    {
+        var hits = new List<S107Hit>();
+        string t = Clean(source);
+        var lineStarts = new List<int>();
+        lineStarts.Add(0);
+        for (int k = 0; k < t.Length; k++) if (t[k] == '\n') lineStarts.Add(k + 1);
+
+        foreach (Match m in Candidate.Matches(t))
+        {
+            string name = m.Groups[1].Value;
+            if (NameKeywords.Contains(name)) continue;
+            int open = m.Index + m.Length - 1;
+            int close = MatchParen(t, open);
+            if (close < 0) continue;
+            int count = CountParams(t.Substring(open + 1, close - open - 1));
+            if (count <= max) continue;
+            if (!FollowedByDeclarationBody(t, close)) continue;
+            string prev = PreviousToken(t, m.Index);
+            if (prev == null) continue;
+
+            int line = lineStarts.BinarySearch(m.Index);
+            if (line < 0) line = ~line - 1;
+            int lineStart = lineStarts[line];
+            string head = t.Substring(lineStart, m.Index - lineStart);
+
+            string kind;
+            if (TypeKeywords.Contains(prev)) kind = "constructeur principal";
+            else if (Modifiers.Contains(prev)) kind = "constructeur";
+            else if (Regex.IsMatch(head, @"\bdelegate\b")) kind = "delegue";
+            else kind = "methode";
+
+            string vis = "implicite (private, local ou membre d'interface)";
+            if (Regex.IsMatch(head, @"\bpublic\b")) vis = "public";
+            else if (Regex.IsMatch(head, @"\bprotected\b")) vis = "protected";
+            else if (Regex.IsMatch(head, @"\binternal\b")) vis = "internal";
+            if (Regex.IsMatch(head, @"\boverride\b")) vis += " override";
+
+            string sig = Regex.Replace(source.Substring(lineStart, close + 1 - lineStart), @"\s+", " ").Trim();
+            if (sig.Length > 220) sig = sig.Substring(0, 217) + "...";
+
+            var h = new S107Hit();
+            h.Line = line + 1; h.Count = count; h.Kind = kind; h.Visibility = vis; h.Signature = sig;
+            hits.Add(h);
+        }
+        return hits;
+    }
+}
+"@
+}
+
+$rootPath = (Resolve-Path $Root).Path
+$excludedDirs = '[\\/](bin|obj|Migrations|node_modules|\.git|\.vs|\.refactoring|packages)[\\/]'
+$testDirs = '[\\/][^\\/]*Tests?[^\\/]*[\\/]'
+$generated = '(\.Designer|\.g|\.g\.i|\.generated|\.AssemblyInfo|\.AssemblyAttributes)\.cs$'
+
+$files = Get-ChildItem -Path $rootPath -Recurse -File -Filter *.cs |
+    Where-Object {
+        $_.FullName -notmatch $excludedDirs -and
+        $_.Name -notmatch $generated -and
+        ($IncludeTests -or $_.FullName.Substring($rootPath.Length) -notmatch $testDirs)
+    }
+
+$results = foreach ($file in $files) {
+    $text = [System.IO.File]::ReadAllText($file.FullName)
+    if ($text.Length -gt 0 -and $text.Substring(0, [Math]::Min(400, $text.Length)) -match '<auto-generated') { continue }
+    foreach ($hit in [S107Scanner]::Scan($text, $Max)) {
+        [pscustomobject]@{
+            Fichier    = $file.FullName.Substring($rootPath.Length).TrimStart('\', '/')
+            Ligne      = $hit.Line
+            Parametres = $hit.Count
+            Type       = $hit.Kind
+            Visibilite = $hit.Visibility
+            Signature  = $hit.Signature
+        }
+    }
+}
+
+$results = @($results | Sort-Object -Property @{ Expression = "Parametres"; Descending = $true }, Fichier, Ligne)
+
+Write-Output ("S107 : {0} declaration(s) avec plus de {1} parametres dans {2} fichier(s) analyse(s)." -f $results.Count, $Max, @($files).Count)
+if ($results.Count -gt 0) {
+    $results | Format-Table Parametres, Type, Visibilite, Fichier, Ligne -AutoSize | Out-String -Width 400 | Write-Output
+    $results | ForEach-Object { Write-Output ("{0}:{1}  [{2}]  {3}" -f $_.Fichier, $_.Ligne, $_.Parametres, $_.Signature) }
+}
+if ($OutCsv) {
+    $results | Export-Csv -Path $OutCsv -NoTypeInformation -Encoding UTF8
+    Write-Output "Export : $OutCsv"
+}
+```
