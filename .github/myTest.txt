@@ -160,10 +160,12 @@ Les seuils ci-dessous sont les **valeurs par défaut de SonarQube pour C#**.
 
 **Priorité des sources** : si le dépôt contient un `SonarLint.xml`, un `.globalconfig`, un `.editorconfig` avec des règles `S****` (`dotnet_diagnostic.Sxxxx.severity`), un fichier `.sonarlint/` ou un Quality Profile exporté, **les seuils et les activations de règles qui y sont définis priment**. Cherche ces fichiers au début de ta mission. Si le seuil de S107 y est différent de 7, utilise-le aussi pour le paramètre `-Max` du script de l'annexe A.
 
+**Exigence ferme de cette mission : la complexité cognitive (S3776) de chaque méthode doit être de 15 au maximum.** Ce seuil n'est pas négociable. Il est vérifié avec le véritable analyseur Sonar (section 6.3 et annexe B), pas à l'œil.
+
 | Règle | Description | Seuil par défaut |
 |---|---|---|
 | S107 | Trop de paramètres (méthodes, constructeurs, délégués, fonctions locales) | > 7 |
-| S3776 | Complexité cognitive d'une méthode | > 15 |
+| S3776 | Complexité cognitive d'une méthode, d'un accesseur, d'une fonction locale ou d'un lambda | > 15 (**exigence ferme**) |
 | S1541 | Complexité cyclomatique d'une méthode | > 10 |
 | S138 | Méthode trop longue | > 80 lignes |
 | S104 | Fichier trop long | > 1000 lignes |
@@ -196,6 +198,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\.refactoring\Find-TooManyP
 - Le script liste **toutes** les déclarations qui ont plus de 7 paramètres : méthodes, constructeurs, constructeurs principaux (`record`/`class`/`struct`), délégués, fonctions locales, membres d'interface et `override`. Les dossiers `bin`, `obj` et `Migrations`, les fichiers générés et les projets de test sont exclus.
 - **Chaque ligne du résultat est une tâche obligatoire.** Tu les ajoutes **toutes** à ta liste de tâches, sans exception et sans tri préalable.
 - Le script est une analyse textuelle. Si une ligne te semble être un faux positif, ouvre le fichier pour vérifier, et justifie-le dans le rapport.
+- L'analyse Sonar de la section 6.3 (annexe B) remonte **aussi** les S107. Ajoute à ta liste toute infraction S107 qu'elle signale et que le script n'aurait pas trouvée. Ta liste S107 est l'**union** des deux sources.
 
 ### Arbre de décision pour chaque ligne du résultat
 
@@ -327,7 +330,50 @@ Alternative valable : un **service d'agrégation (facade service)** qui regroupe
 - **S3253** : supprime le constructeur par défaut vide et redondant, sauf s'il est nécessaire à la visibilité ou documenté.
 - **S3963** : les champs statiques initialisés dans un constructeur statique sont initialisés directement à la déclaration, si l'ordre d'initialisation reste le même.
 
-## 6.3 Complexité et longueur des méthodes (S3776, S1541, S138, S134, S1067)
+## 6.3 Complexité cognitive — S3776 (> 15) — DÉTECTION OBLIGATOIRE PAR L'ANALYSEUR SONAR — et longueur des méthodes (S1541, S138, S134, S1067)
+
+### Détection
+
+Tu n'estimes **jamais** la complexité cognitive en lisant le code : son calcul (incréments, pénalités d'imbrication, séquences d'opérateurs logiques, récursion) est trop subtil pour être fait de tête. Tu utilises **obligatoirement** le script `Invoke-SonarRules.ps1`, extrait de l'annexe B à l'étape 7.1. Il lance le **véritable analyseur SonarQube pour C#** (SonarAnalyzer.CSharp) dans un build d'analyse séparé :
+- il ne modifie **aucun** fichier du dépôt : ni `.csproj`, ni `Directory.Build.props`, ni `.editorconfig`, ni package ;
+- l'analyseur utilisé est **`SonarAnalyzer.CSharp.dll`, fourni à la racine du dépôt**. Le script le prend automatiquement, sans téléchargement. C'est un outil de la mission : tu ne le déplaces pas, tu ne le modifies pas et tu ne le commites pas. Seulement s'il est absent, le script télécharge la dernière version stable dans `.refactoring/sonar/` ;
+- la première ligne affichée indique l'analyseur utilisé et sa version : reporte-la dans le rapport (section 12, point 2) ;
+- seules les règles demandées sont activées ;
+- le résultat est exactement ce que SonarQube signalera.
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.refactoring\Invoke-SonarRules.ps1 -Rules S3776,S107 -OutCsv .\.refactoring\sonar-initial.csv
+```
+
+- Si le dépôt contient plusieurs solutions, le script les analyse toutes. Pour en cibler une, ajoute `-Solution <chemin.sln>`.
+- Chaque ligne S3776 donne la méthode (fichier et ligne), sa complexité actuelle (`Valeur`) et le seuil (`Seuil` = 15).
+- **Chaque ligne S3776 est une tâche obligatoire**, à ajouter à ta liste dans le lot 2, sans exception et sans tri préalable.
+- Le build d'analyse est distinct de tes builds normaux. Les comptes d'erreurs et d'avertissements de la section 3.3 se mesurent **toujours** avec le build normal (`dotnet build <solution>`), jamais avec le build d'analyse.
+- Si le téléchargement de l'analyseur échoue (proxy, pas d'accès Internet), applique la section 9, point 3.
+
+### Objectif pour chaque méthode signalée
+
+- La méthode d'origine passe à **15 ou moins**.
+- **Chaque méthode extraite** est aussi à 15 ou moins **et** a 7 paramètres au maximum (S107). Déplacer la complexité dans une seule méthode extraite ne corrige rien.
+- Vise une marge : 10 à 12 plutôt que 15 tout juste, sans pour autant découper artificiellement.
+- Une méthode S3776 est **presque toujours corrigeable**, car sa signature ne change pas. Les seules raisons acceptables de la laisser en dette sont :
+  - un refactoring annulé après 2 tentatives (section 7.5, point 7), avec la cause précise ;
+  - une méthode intestable sans infrastructure **et** trop risquée à restructurer (section 7.4, point 3), avec ton analyse du risque ;
+  - du code généré (déjà exclu par Sonar).
+
+### Boucle de travail pour S3776
+
+Pour chaque méthode signalée, de la plus complexe à la moins complexe :
+1. Lis la méthode en entier et note ce qui contribue le plus à sa complexité : imbrication profonde, cascades de `if/else if`, `switch` avec logique dans les `case`, boucles imbriquées, conditions composées de `&&`/`||` mélangés, `try/catch` imbriqués, lambdas ou fonctions locales imbriquées.
+2. Vérifie la couverture par les tests ; si elle est insuffisante, écris d'abord des tests de caractérisation (section 7.4). Pour S3776 c'est **particulièrement important** : chaque branche que tu réorganises doit être couverte.
+3. Applique les techniques ci-dessous.
+4. Compile et teste.
+5. **Relance l'analyse Sonar** pour vérifier la nouvelle valeur. Tu peux cibler la règle seule avec `-Rules S3776`. Si la méthode ou une méthode extraite dépasse encore 15, recommence.
+6. Commite : `refactor(<zone>): réduit la complexité cognitive de <Methode> de 37 à 9 (S3776)`.
+
+Pour gagner du temps sur une grosse solution, tu peux traiter plusieurs méthodes d'un même fichier avant de relancer l'analyse. Mais tu relances **au moins** une fois par fichier traité, et à la fin du lot 2.
+
+### Techniques
 
 **Techniques, par ordre de préférence** :
 1. **Clauses de garde et retour anticipé** : inverser les conditions pour sortir tôt et supprimer l'imbrication.
@@ -398,7 +444,18 @@ private static decimal AppliquerRemisePremium(Client client, decimal prix)
 - n'extrais pas un bloc qui contient un `return`, un `break`, un `continue` ou un `yield` vers l'extérieur sans reproduire exactement le même flux de contrôle ;
 - dans une méthode `async`, une méthode extraite qui contient des `await` devient `async Task`/`Task<T>`, et l'appel est `await`é au même endroit ;
 - dans un itérateur (`yield return`), sois très prudent : l'exécution est différée ;
-- une méthode extraite ne doit pas elle-même dépasser 7 paramètres (S107). Si c'est le cas, le découpage est mauvais : revois-le.
+- une méthode extraite ne doit pas elle-même dépasser 7 paramètres (S107) ni 15 de complexité cognitive (S3776). Si c'est le cas, le découpage est mauvais : revois-le ;
+- remplacer une cascade de `if` par une expression `switch` ou un dictionnaire ne doit **pas** changer l'ordre d'évaluation des conditions, ni le cas par défaut, ni l'exception levée pour un cas non prévu.
+
+### Contrôle de fin S3776
+
+À la fin du lot 2, et de nouveau à la vérification finale (section 11), relance :
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.refactoring\Invoke-SonarRules.ps1 -Rules S3776,S107 -OutCsv .\.refactoring\sonar-final.csv
+```
+
+Chaque ligne S3776 qui reste dans `sonar-final.csv` doit apparaître dans « Dette restante », avec l'une des justifications acceptables ci-dessus. **Une ligne S3776 restante sans justification signifie que la mission n'est pas terminée** : traite-la avant de rendre ton rapport. Les nouvelles lignes S3776, introduites par une méthode extraite, sont des régressions à corriger immédiatement.
 
 ## 6.4 Classes trop grosses, trop couplées, « classes dieu » (S104, S1200)
 
@@ -503,24 +560,24 @@ Avant toute modification :
 3. Identifie les projets de test, leur framework de test, leur bibliothèque de mock et leur bibliothèque d'assertions.
 4. Identifie le conteneur DI et l'endroit où les services sont enregistrés.
 5. Lis le `README` et les éventuels guides de contribution ou conventions (`CONTRIBUTING.md`, `docs/`, `.github/copilot-instructions.md`) et respecte-les.
-6. **Prépare les outils de la mission.** Tu ne recopies **jamais** le script de l'annexe A à la main : tu l'extrais de ce fichier avec la commande ci-dessous, à lancer telle quelle dans un terminal PowerShell, à la racine du dépôt. Elle :
+6. **Prépare les outils de la mission.** Tu ne recopies **jamais** les scripts des annexes A et B à la main : tu les extrais de ce fichier avec la commande ci-dessous, à lancer telle quelle dans un terminal PowerShell, à la racine du dépôt. Elle :
    - crée le dossier `.refactoring/` ;
-   - l'exclut de git localement, avec ce fichier d'instructions (`.git/info/exclude`, sans toucher au `.gitignore` partagé) ;
-   - extrait le script ;
-   - vérifie qu'il s'exécute.
+   - l'exclut de git localement, avec ce fichier d'instructions et les fichiers d'éditeur (`.vscode/`, `.vs/`, `.idea/`, `*.user`, `*.suo`), ainsi que `SonarAnalyzer.CSharp.dll` à la racine, dans `.git/info/exclude`, sans toucher au `.gitignore` partagé ;
+   - extrait les deux scripts (`Find-TooManyParameters.ps1` et `Invoke-SonarRules.ps1`) ;
+   - vérifie que le premier s'exécute.
 
    ```text
-   New-Item -ItemType Directory -Force .refactoring | Out-Null; if (Test-Path .git) { $ex = '.git\info\exclude'; if (-not (Test-Path $ex)) { New-Item -ItemType File -Force -Path $ex | Out-Null }; foreach ($p in '.refactoring/', 'REFACTORING_TECHLEAD.md') { if (-not (Select-String -Path $ex -SimpleMatch $p -Quiet)) { Add-Content -Path $ex -Value $p } } }; $md = [IO.File]::ReadAllText((Resolve-Path .\REFACTORING_TECHLEAD.md)); $m = [regex]::Match($md, '(?ms)^```powershell\r?\n(.*?)^```'); if (-not $m.Success) { throw 'Script introuvable dans REFACTORING_TECHLEAD.md' }; [IO.File]::WriteAllText((Join-Path (Resolve-Path .refactoring) 'Find-TooManyParameters.ps1'), $m.Groups[1].Value, (New-Object Text.UTF8Encoding $true)); powershell -NoProfile -ExecutionPolicy Bypass -File .\.refactoring\Find-TooManyParameters.ps1 -Root . -Max 7 | Select-Object -First 1
+   New-Item -ItemType Directory -Force .refactoring | Out-Null; if (Test-Path .git) { $ex = '.git\info\exclude'; if (-not (Test-Path $ex)) { New-Item -ItemType File -Force -Path $ex | Out-Null }; foreach ($p in '.refactoring/', 'REFACTORING_TECHLEAD.md', '.vscode/', '.vs/', '.idea/', '*.user', '*.suo', '/SonarAnalyzer.CSharp.dll') { if (-not (Select-String -Path $ex -SimpleMatch $p -Quiet)) { Add-Content -Path $ex -Value $p } } }; $md = [IO.File]::ReadAllText((Resolve-Path .\REFACTORING_TECHLEAD.md)); $ms = [regex]::Matches($md, '(?ms)^```powershell[ \t]+(\S+\.ps1)[ \t]*\r?\n(.*?)^```'); if ($ms.Count -lt 2) { throw 'Scripts introuvables dans REFACTORING_TECHLEAD.md' }; foreach ($m in $ms) { [IO.File]::WriteAllText((Join-Path (Resolve-Path .refactoring) $m.Groups[1].Value), $m.Groups[2].Value, (New-Object Text.UTF8Encoding $true)); 'Extrait : ' + $m.Groups[1].Value }; powershell -NoProfile -ExecutionPolicy Bypass -File .\.refactoring\Find-TooManyParameters.ps1 -Root . -Max 7 | Select-Object -First 1
    ```
 
-   Le fichier `.git\info\exclude` n'est créé que s'il est absent ; s'il existe, les deux lignes sont seulement ajoutées à la fin. Si `powershell` n'existe pas (Linux/macOS), remplace-le par `pwsh` dans toutes les commandes de ce fichier.
+   Le fichier `.git\info\exclude` n'est créé que s'il est absent ; s'il existe, seules les lignes manquantes sont ajoutées à la fin. Si `powershell` n'existe pas (Linux/macOS), remplace-le par `pwsh` dans toutes les commandes de ce fichier.
 
-   La dernière ligne affichée doit commencer par `S107 :`. Sinon, analyse l'erreur et corrige **la commande d'extraction**, jamais le contenu du script.
+   L'affichage doit contenir `Extrait : Find-TooManyParameters.ps1`, `Extrait : Invoke-SonarRules.ps1`, puis une dernière ligne qui commence par `S107 :`. Sinon, analyse l'erreur et corrige **la commande d'extraction**, jamais le contenu des scripts.
 
 ## 7.2 Étape 1 — État initial (baseline)
 
 1. Si le dépôt est sous git :
-   - vérifie que l'arbre de travail est propre (`git status`). Ignore `REFACTORING_TECHLEAD.md` et `.refactoring/`. Si d'autres fichiers sont modifiés ou non suivis, **arrête-toi et signale-le** ;
+   - vérifie que l'arbre de travail est propre (`git status`). **Ignore** les éléments suivants, qu'ils soient non suivis **ou** suivis et modifiés : `REFACTORING_TECHLEAD.md`, `.refactoring/` et les fichiers d'éditeur ou d'IDE (`.vscode/`, `.vs/`, `.idea/`, `*.user`, `*.suo`), ainsi que `SonarAnalyzer.CSharp.dll` à la racine. Tu ne les commites jamais et tu ne les annules jamais. Si **d'autres** fichiers sont modifiés ou non suivis, **arrête-toi et signale-le** ;
    - crée une branche `refactor/sonar-cleanup` depuis la branche courante. Si elle existe déjà (reprise d'une session précédente), place-toi dessus sans la recréer.
 2. Lance, dans le terminal, à la racine :
    ```text
@@ -543,12 +600,13 @@ Avant toute modification :
 
 1. Parcours **tous** les projets de production (pas les projets de test, sauf pour les problèmes de compilation que tu y causerais).
 2. **Lance le script S107** (section 6.1, sortie `.refactoring/s107-initial.csv`). Ajoute **chaque** ligne du résultat à ta liste de tâches, dans le lot 3. Note le nombre total : il apparaîtra dans le rapport.
+2 bis. **Lance l'analyse Sonar** (section 6.3, sortie `.refactoring/sonar-initial.csv`). Ajoute **chaque** ligne S3776 à ta liste de tâches, dans le lot 2, et chaque ligne S107 absente du point 2, dans le lot 3. Note les nombres totaux : ils apparaîtront dans le rapport.
 3. Récupère les problèmes déjà signalés : panneau « Problèmes », avertissements du build, diagnostics SonarLint/SonarAnalyzer s'ils sont installés.
-4. Complète par ta propre analyse avec le catalogue de la section 6. Pour chaque fichier, mesure : nombre de constructeurs, longueur des méthodes, niveau d'imbrication, nombre de dépendances injectées, nombre de lignes. Le nombre de paramètres, lui, vient du script.
+4. Complète par ta propre analyse avec le catalogue de la section 6. Pour chaque fichier, mesure : nombre de constructeurs, longueur des méthodes, niveau d'imbrication, nombre de dépendances injectées, nombre de lignes. Le nombre de paramètres et la complexité cognitive, eux, viennent **uniquement** des scripts.
 5. Construis une **liste de tâches** structurée : fichier, ligne, règle, description courte, gravité (Bloquant / Critique / Majeur / Mineur / Info), risque du refactoring (faible / moyen / élevé).
 6. Ordonne la liste en **lots**, du moins risqué au plus risqué :
    - **Lot 1 — Hygiène à faible risque** : `using` inutiles, code commenté, variables et membres privés inutilisés, `readonly`, `static` privé, `sealed`, littéraux dupliqués, simplifications booléennes. Gain rapide, risque quasi nul.
-   - **Lot 2 — Complexité locale** : clauses de garde, Extract Method, conditions nommées, ternaires imbriqués, `if` fusionnables. Le refactoring reste à l'intérieur d'une classe, sans changement de signature.
+   - **Lot 2 — Complexité locale** : **toutes les lignes S3776 de l'analyse Sonar**, puis clauses de garde, Extract Method, conditions nommées, ternaires imbriqués, `if` fusionnables. Le refactoring reste à l'intérieur d'une classe, sans changement de signature publique.
    - **Lot 3 — Signatures** : **toutes les lignes du script S107**, chaînage et réduction des constructeurs, `throw;`, `using` sur les `IDisposable`. Les signatures changent et les appelants comme les tests sont impactés.
    - **Lot 4 — Structure** : découpage de classes, extraction de services, nouvelles injections de dépendances, suppression de duplication entre classes. Impact le plus large.
 
@@ -577,7 +635,7 @@ Pour **chaque** élément de la liste de tâches :
 5. **Compile** : `dotnet build <solution> --no-restore`.
 6. **Teste** : `dotnet test <projet de test concerné> --no-build` après chaque modification. Lance la **solution entière** (`dotnet test <solution> --no-build`) à la fin de chaque lot, et après tout changement de signature ou d'enregistrement DI.
 7. **Si quelque chose casse** : analyse la cause et corrige. Si tu ne trouves pas une correction sûre en 2 tentatives, **annule** ce refactoring (`git checkout -- <fichiers>` ou retour manuel), note-le dans « Dette restante » avec la raison, et passe au suivant.
-8. **Commit** (si git est disponible) : un commit par refactoring cohérent, au format Conventional Commits. N'ajoute jamais `REFACTORING_TECHLEAD.md` ni `.refactoring/` à un commit (pas de `git add -A` / `git add .` sans avoir vérifié qu'ils sont bien exclus).
+8. **Commit** (si git est disponible) : un commit par refactoring cohérent, au format Conventional Commits. N'ajoute jamais `REFACTORING_TECHLEAD.md`, `.refactoring/` ni les fichiers d'éditeur (`.vscode/`, `.vs/`, `.idea/`, `*.user`, `*.suo`), ainsi que `SonarAnalyzer.CSharp.dll` à la racine à un commit. Ajoute les fichiers un par un (`git add <fichier>`) ou vérifie avec `git status` avant tout `git add -A` / `git add .`.
    - `refactor(facturation): introduit DemandeFacture pour réduire les paramètres de CreerFacture (S107)`
    - `refactor(commandes): extrait CalculateurRemise depuis CommandeService (S1200, S3776)`
    - `chore(core): supprime les using et membres privés inutilisés (S1128, S1144)`
@@ -587,7 +645,7 @@ Pour **chaque** élément de la liste de tâches :
    Ne fais jamais de push et ne crée pas de pull request, sauf demande explicite.
 9. **Ne passe jamais** à l'élément suivant si le build ou les tests sont rouges.
 
-À la fin du lot 3, lance le contrôle de fin S107 (section 6.1).
+À la fin du lot 2, lance le contrôle de fin S3776 (section 6.3). À la fin du lot 3, lance le contrôle de fin S107 (section 6.1). Les refactorings des lots 3 et 4 ne doivent pas faire réapparaître de S3776 : le contrôle final (section 11) le vérifie.
 
 ## 7.6 Règles d'édition spécifiques (Copilot)
 
@@ -646,8 +704,8 @@ Règles :
 
 Arrête-toi et rends ton rapport (section 12) dans ces cas :
 1. La solution ne compile pas, ou des tests unitaires échouent à l'état initial (section 7.2).
-2. L'arbre de travail git n'est pas propre au départ (hors `REFACTORING_TECHLEAD.md` et `.refactoring/`).
-3. Le script de l'annexe A ne peut pas être extrait ou exécuté après correction de la commande d'extraction.
+2. L'arbre de travail git n'est pas propre au départ, en dehors de `REFACTORING_TECHLEAD.md`, `.refactoring/` et des fichiers d'éditeur (`.vscode/`, `.vs/`, `.idea/`, `*.user`, `*.suo`), ainsi que `SonarAnalyzer.CSharp.dll` à la racine. Ces fichiers-là ne sont **jamais** une raison de s'arrêter.
+3. Un script des annexes A ou B ne peut pas être extrait ou exécuté après correction de la commande d'extraction. **Cas particulier** : `SonarAnalyzer.CSharp.dll` doit se trouver à la racine du dépôt. S'il est absent **et** que `Invoke-SonarRules.ps1` ne peut pas télécharger l'analyseur (proxy, pas d'accès Internet), arrête-toi et demande-moi de déposer la DLL à la racine. Tu n'estimes **jamais** la complexité cognitive à la main pour contourner ce blocage, et tu ne cherches pas la DLL ailleurs sur le poste.
 4. Un refactoring nécessaire toucherait un contrat externe et la façade (section 3.5) n'est pas possible.
 5. Tu détectes un problème de sécurité critique (secret en clair, injection) : signale-le en priorité, en tête du rapport.
 6. Tu as traité tout ce que tu pouvais traiter dans la session. Si la solution est trop volumineuse :
@@ -678,13 +736,14 @@ Avant d'écrire ton rapport :
 1. `dotnet build <solution> -c Debug` et `dotnet build <solution> -c Release` : **0 erreur**. Avertissements inférieurs ou égaux à l'état initial (compare les listes, pas seulement les nombres).
 2. `dotnet test <solution>` : **tous les tests** qui passaient à l'état initial passent. Les tests ajoutés passent aussi. Les échecs préexistants liés à l'environnement sont dans le même état qu'au départ.
 3. Relance le script S107 (contrôle de fin de la section 6.1, sortie `.refactoring/s107-final.csv`). Chaque ligne restante doit être justifiée dans la dette ; sinon, la mission n'est pas terminée.
+3 bis. Relance l'analyse Sonar (contrôle de fin de la section 6.3, sortie `.refactoring/sonar-final.csv`). **Aucune méthode ne doit dépasser 15 de complexité cognitive**, sauf justification acceptable dans la dette ; sinon, la mission n'est pas terminée. Les S107 qu'elle remonte doivent aussi être justifiés.
 4. `git diff <branche de départ>...HEAD --stat` puis relecture du diff complet, fichier par fichier, en te posant pour chaque modification :
    - « Est-ce qu'un comportement observable a changé ? »
    - « Est-ce qu'un contrat externe a changé ? »
    - « Est-ce qu'un test a été affaibli ? »
    - « Est-ce que du code a été perdu par erreur ? »
 5. Vérifie que chaque nouveau service est **enregistré dans le conteneur DI** avec la bonne durée de vie. Si l'application a un test de démarrage ou de résolution DI (`WebApplicationFactory`, test de validation du conteneur), lance-le.
-6. `git status` : ni `REFACTORING_TECHLEAD.md` ni `.refactoring/` ne figurent dans les commits de la branche.
+6. `git status` : ni `REFACTORING_TECHLEAD.md`, ni `.refactoring/`, ni les fichiers d'éditeur (`.vscode/`, `.vs/`, `.idea/`, `*.user`, `*.suo`), ainsi que `SonarAnalyzer.CSharp.dll` à la racine ne figurent dans les commits de la branche.
 
 # 12. Rapport final
 
@@ -700,7 +759,9 @@ Termine par un rapport en Markdown, dans le chat, avec exactement ces sections :
 | Avertissements (Debug / Release) | | |
 | Tests passés / échoués / ignorés | | |
 | Tests ajoutés | — | |
-| Déclarations S107 (script) | | |
+| Déclarations S107 (script / analyse Sonar) | | |
+| Méthodes S3776 > 15 (analyse Sonar) | | |
+| Analyseur Sonar utilisé (chemin, version) | | |
 
 ### 3. Corrections effectuées
 Regroupées par lot, puis par règle Sonar :
@@ -714,6 +775,13 @@ Regroupées par lot, puis par règle Sonar :
 | Fichier:ligne | Déclaration | Nb paramètres avant → après | Décision (cas de l'arbre 6.1) | Objet(s) paramètre créé(s) | Appelants mis à jour | Commit |
 |---|---|---|---|---|---|---|
 
+### 3 ter. Bilan S3776 (complexité cognitive, seuil 15)
+- Nombre initial (`sonar-initial.csv`) : X — nombre final (`sonar-final.csv`) : Y.
+- Tableau de **toutes** les lignes S3776 du fichier initial, sans exception :
+
+| Fichier:ligne | Méthode | Complexité avant → après | Méthodes extraites (complexité de chacune) | Technique(s) appliquée(s) | Tests de caractérisation ajoutés | Commit |
+|---|---|---|---|---|---|---|
+
 ### 4. Nouveaux éléments créés
 Liste des nouvelles classes, interfaces, records et méthodes publiques ou internes : emplacement et responsabilité. Liste des **enregistrements DI ajoutés** (fichier, ligne, durée de vie).
 
@@ -724,7 +792,7 @@ Pour chacun : symptôme, cause, impact, correctif, test ajouté, commit. Si aucu
 Pour chacun : fichier et ligne, description, pourquoi c'est suspect, pourquoi tu n'as pas corrigé, recommandation.
 
 ### 7. Dette restante
-Problèmes identifiés mais non traités (contrat externe, signature imposée, risque trop élevé, refactoring annulé, session trop courte, règle en dessous du seuil mais à surveiller) : règle, fichier, raison, recommandation et effort estimé (S/M/L). **Chaque ligne de `s107-final.csv` doit y figurer.**
+Problèmes identifiés mais non traités (contrat externe, signature imposée, risque trop élevé, refactoring annulé, session trop courte, règle en dessous du seuil mais à surveiller) : règle, fichier, raison, recommandation et effort estimé (S/M/L). **Chaque ligne de `s107-final.csv` et de `sonar-final.csv` doit y figurer.**
 
 ### 8. Tests modifiés ou ajoutés
 - Tests dont la partie « Arrange » a été adaptée : liste, avec la confirmation explicite qu'**aucune assertion ni vérification de mock n'a été modifiée**.
@@ -738,9 +806,9 @@ Liste brute : fichier, ligne, texte.
 
 # Annexe A — Script `Find-TooManyParameters.ps1` (S107)
 
-Ce bloc est extrait **automatiquement** par la commande de la section 7.1. Ne le recopie pas à la main et ne le modifie pas. C'est le **seul** bloc `powershell` de ce fichier : la commande d'extraction s'appuie là-dessus.
+Ce bloc est extrait **automatiquement** par la commande de la section 7.1. Ne le recopie pas à la main et ne le modifie pas. Les blocs `powershell` suivis d'un nom de fichier `.ps1` (annexes A et B) sont les seuls que la commande d'extraction prend en compte.
 
-```powershell
+```powershell Find-TooManyParameters.ps1
 <#
 .SYNOPSIS
     Liste toutes les methodes, constructeurs, constructeurs principaux, delegues et fonctions
@@ -1009,7 +1077,7 @@ public static class S107Scanner
 }
 
 $rootPath = (Resolve-Path $Root).Path
-$excludedDirs = '[\\/](bin|obj|Migrations|node_modules|\.git|\.vs|\.refactoring|packages)[\\/]'
+$excludedDirs = '[\\/](bin|obj|Migrations|node_modules|\.git|\.vs|\.vscode|\.idea|\.refactoring|packages)[\\/]'
 $testDirs = '[\\/][^\\/]*Tests?[^\\/]*[\\/]'
 $generated = '(\.Designer|\.g|\.g\.i|\.generated|\.AssemblyInfo|\.AssemblyAttributes)\.cs$'
 
@@ -1044,6 +1112,171 @@ if ($results.Count -gt 0) {
 }
 if ($OutCsv) {
     $results | Export-Csv -Path $OutCsv -NoTypeInformation -Encoding UTF8
+    Write-Output "Export : $OutCsv"
+}
+```
+
+# Annexe B — Script `Invoke-SonarRules.ps1` (S3776, S107 — analyseur Sonar officiel)
+
+Ce bloc est extrait **automatiquement** par la commande de la section 7.1. Ne le recopie pas à la main et ne le modifie pas.
+
+Fonctionnement : le script prend l'analyseur dans cet ordre :
+1. `-AnalyzerPath` s'il est fourni ;
+2. `SonarAnalyzer.CSharp.dll` à la racine du dépôt (cas normal) ;
+3. une copie déjà téléchargée dans `.refactoring/sonar/` ;
+4. sinon, il télécharge la dernière version stable. Il lance ensuite un `dotnet build` d'analyse qui injecte l'analyseur et une configuration n'activant que les règles demandées, via la propriété MSBuild `CustomAfterMicrosoftCommonTargets`. Aucun fichier du dépôt n'est modifié. Il lit enfin le journal de build et produit la liste des infractions, avec leur valeur et le seuil.
+
+```powershell Invoke-SonarRules.ps1
+<#
+.SYNOPSIS
+    Lance le VRAI analyseur SonarQube pour C# (SonarAnalyzer.CSharp) sur la solution, sans modifier
+    aucun projet, et liste les infractions des regles demandees (par defaut S3776 et S107).
+
+.DESCRIPTION
+    - Analyseur, par ordre de priorite : -AnalyzerPath, SonarAnalyzer.CSharp.dll a la racine du depot,
+      copie deja telechargee dans le dossier du script, sinon telechargement de la derniere version stable.
+    - Lance un build d'analyse separe : l'analyseur est injecte via la propriete MSBuild
+      CustomAfterMicrosoftCommonTargets, et une configuration globale n'active QUE les regles demandees.
+      Aucun .csproj, Directory.Build.props ou .editorconfig du depot n'est modifie.
+    - Les avertissements-en-erreurs sont desactives pour ce build d'analyse uniquement.
+    - Seuils : ceux de l'analyseur (S3776 = 15, S107 = 7), sauf si le depot fournit un SonarLint.xml.
+    Compatible Windows PowerShell 5.1 et PowerShell 7+. Fichier volontairement en ASCII pur.
+
+.EXAMPLE
+    .\Invoke-SonarRules.ps1
+    .\Invoke-SonarRules.ps1 -Solution .\MaSolution.sln -OutCsv sonar.csv
+    .\Invoke-SonarRules.ps1 -Rules S3776 -IncludeTests
+    .\Invoke-SonarRules.ps1 -AnalyzerPath C:\outils\SonarAnalyzer.CSharp.dll
+#>
+param(
+    [string]$Solution,
+    [string[]]$Rules = @("S3776", "S107"),
+    [string]$Configuration = "Debug",
+    [string]$AnalyzerPath,
+    [switch]$IncludeTests,
+    [string]$OutCsv
+)
+
+$ErrorActionPreference = "Stop"
+# Avec "powershell -File", "-Rules S3776,S107" arrive comme une seule chaine : on la decoupe.
+$Rules = @($Rules | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$toolDir = $PSScriptRoot
+$root = (Get-Location).Path
+
+# 1. Analyseur Sonar
+if (-not $AnalyzerPath) {
+    $rootDll = Join-Path $root "SonarAnalyzer.CSharp.dll"
+    if (Test-Path $rootDll) { $AnalyzerPath = $rootDll }
+    else { $AnalyzerPath = Join-Path $toolDir "sonar\analyzers\SonarAnalyzer.CSharp.dll" }
+    if (-not (Test-Path $AnalyzerPath)) {
+        Write-Output "Telechargement de SonarAnalyzer.CSharp..."
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $versions = (Invoke-RestMethod "https://api.nuget.org/v3-flatcontainer/sonaranalyzer.csharp/index.json").versions
+        $version = @($versions | Where-Object { $_ -notmatch '-' })[-1]
+        $zip = Join-Path $toolDir "sonar.zip"
+        Invoke-WebRequest "https://api.nuget.org/v3-flatcontainer/sonaranalyzer.csharp/$version/sonaranalyzer.csharp.$version.nupkg" -OutFile $zip -UseBasicParsing
+        Expand-Archive $zip (Join-Path $toolDir "sonar") -Force
+        Remove-Item $zip
+        Write-Output "SonarAnalyzer.CSharp $version installe dans $toolDir\sonar"
+    }
+}
+if (-not (Test-Path $AnalyzerPath)) { throw "Analyseur introuvable : $AnalyzerPath" }
+$AnalyzerPath = (Resolve-Path $AnalyzerPath).Path
+Write-Output ("Analyseur : {0} (version {1})" -f $AnalyzerPath, [Diagnostics.FileVersionInfo]::GetVersionInfo($AnalyzerPath).FileVersion)
+
+# 2. Configuration d'analyse (fichiers dans le dossier du script, jamais dans le depot)
+$globalConfig = Join-Path $toolDir "sonar-rules.globalconfig"
+$lines = @("is_global = true", "global_level = 1000", "dotnet_analyzer_diagnostic.severity = none")
+foreach ($rule in $Rules) { $lines += "dotnet_diagnostic.$rule.severity = warning" }
+[IO.File]::WriteAllLines($globalConfig, $lines)
+
+$targets = Join-Path $toolDir "sonar-rules.targets"
+[IO.File]::WriteAllText($targets, @"
+<Project>
+  <ItemGroup>
+    <Analyzer Include="$AnalyzerPath" />
+    <EditorConfigFiles Include="$globalConfig" />
+  </ItemGroup>
+</Project>
+"@)
+
+# 3. Solutions a analyser
+if ($Solution) { $solutions = @((Resolve-Path $Solution).Path) }
+else { $solutions = @(Get-ChildItem -Path $root -File | Where-Object { $_.Extension -in ".sln", ".slnx" } | ForEach-Object { $_.FullName }) }
+if ($solutions.Count -eq 0) { throw "Aucune solution (.sln/.slnx) a la racine. Utilise -Solution." }
+
+# 4. Build d'analyse et extraction des diagnostics
+$pattern = '^\s*(?<file>[^\s(][^(]*?)\((?<line>\d+),(?<col>\d+)(?:,\d+,\d+)?\)\s*:\s+(?<sev>warning|error)\s+(?<rule>S\d+)\s*:\s+(?<msg>.*?)(?:\s+\[(?<proj>[^\]]+)\])?\s*$'
+$compileError = '^\s*[^(]+\(\d+,\d+\)\s*:\s+error\s+CS\d+'
+$testDirs = '[\\/][^\\/]*Tests?[^\\/]*[\\/]'
+$seen = @{}
+$results = New-Object System.Collections.Generic.List[object]
+
+foreach ($sln in $solutions) {
+    Write-Output "Analyse de $sln ($Configuration)..."
+    # Journal fichier : contrairement a la console, les lignes ne sont pas coupees a la largeur du terminal.
+    $log = Join-Path $toolDir ("sonar-build-" + [IO.Path]::GetFileNameWithoutExtension($sln) + ".log")
+    $console = & dotnet build $sln -c $Configuration --no-incremental -nologo -v:q `
+        "-p:CustomAfterMicrosoftCommonTargets=$targets" "-p:RunAnalyzers=true" "-p:RunAnalyzersDuringBuild=true" `
+        "-p:TreatWarningsAsErrors=false" "-p:WarningsAsErrors=" "-p:CodeAnalysisTreatWarningsAsErrors=false" `
+        -fl "-flp:LogFile=$log;Verbosity=minimal;NoSummary;Encoding=UTF-8" 2>&1
+    $buildExit = $LASTEXITCODE
+    $output = @(Get-Content -Path $log -Encoding UTF8)
+
+    $csErrors = @($output | Where-Object { "$_" -match $compileError })
+    if ($csErrors.Count -gt 0) {
+        $csErrors | Select-Object -First 20 | ForEach-Object { Write-Output "$_" }
+        throw "La solution ne compile pas ($sln) : analyse impossible."
+    }
+    if ($buildExit -ne 0) {
+        @($output) + @($console) | Select-Object -Last 30 | ForEach-Object { Write-Output "$_" }
+        throw "Echec du build d'analyse ($sln), code $buildExit."
+    }
+
+    foreach ($o in $output) {
+        $m = [regex]::Match("$o", $pattern)
+        if (-not $m.Success) { continue }
+        $rule = $m.Groups["rule"].Value
+        if ($Rules -notcontains $rule) { continue }
+        $file = $m.Groups["file"].Value.Trim()
+        if (-not [IO.Path]::IsPathRooted($file)) { $file = Join-Path (Split-Path $sln) $file }
+        $rel = $file
+        if ($file.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { $rel = $file.Substring($root.Length).TrimStart('\', '/') }
+        if (-not $IncludeTests -and ("\" + $rel) -match $testDirs) { continue }
+        $key = "$rel|$($m.Groups['line'].Value)|$($m.Groups['col'].Value)|$rule"
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+
+        $msg = $m.Groups["msg"].Value
+        $value = $null; $limit = $null
+        $c = [regex]::Match($msg, 'from (\d+) to the (\d+) allowed')
+        if ($c.Success) { $value = [int]$c.Groups[1].Value; $limit = [int]$c.Groups[2].Value }
+        $p = [regex]::Match($msg, 'has (\d+) parameters?, which is greater than the (\d+) authorized')
+        if ($p.Success) { $value = [int]$p.Groups[1].Value; $limit = [int]$p.Groups[2].Value }
+
+        $results.Add([pscustomobject]@{
+            Regle   = $rule
+            Valeur  = $value
+            Seuil   = $limit
+            Fichier = $rel
+            Ligne   = [int]$m.Groups["line"].Value
+            Message = $msg
+        })
+    }
+}
+
+$sorted = @($results | Sort-Object Regle, @{ Expression = "Valeur"; Descending = $true }, Fichier, Ligne)
+
+foreach ($rule in $Rules) {
+    $n = @($sorted | Where-Object { $_.Regle -eq $rule }).Count
+    Write-Output ("{0} : {1} infraction(s)." -f $rule, $n)
+}
+if ($sorted.Count -gt 0) {
+    $sorted | Format-Table Regle, Valeur, Seuil, Fichier, Ligne -AutoSize | Out-String -Width 400 | Write-Output
+    $sorted | ForEach-Object { Write-Output ("{0}:{1}  [{2} {3}/{4}]  {5}" -f $_.Fichier, $_.Ligne, $_.Regle, $_.Valeur, $_.Seuil, $_.Message) }
+}
+if ($OutCsv) {
+    $sorted | Export-Csv -Path $OutCsv -NoTypeInformation -Encoding UTF8
     Write-Output "Export : $OutCsv"
 }
 ```
