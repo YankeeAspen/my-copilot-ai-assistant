@@ -1,64 +1,84 @@
-
 #file:REFACTORING_TECHLEAD.md
 
-# Reprise : rattrapage de la règle S107 (méthodes et constructeurs avec trop de paramètres)
+# Reprise temporaire : analyse Sonar (S3776 et S107) sur le travail en cours
 
-Une session précédente a exécuté cette mission sur la branche `refactor/sonar-cleanup`, mais elle a **raté les méthodes et constructeurs qui ont trop de paramètres** (S107). Elle les cherchait en lisant le code, ce qui n'est pas fiable, et elle a pu les contourner avec des façades. Le fichier `REFACTORING_TECHLEAD.md` a été mis à jour pour corriger ça : détection obligatoire par script (section 6.1 et annexe A), et définition stricte des contrats externes (section 3.5.1).
+Un travail de refactoring est **déjà en cours** dans ce dépôt, mené selon une version précédente de `REFACTORING_TECHLEAD.md`. Cette version estimait la complexité cognitive et le nombre de paramètres en lisant le code, et a donc raté des méthodes. Le fichier a été mis à jour : ces deux règles sont maintenant mesurées par des outils (annexes A et B), et l'analyseur Sonar officiel `SonarAnalyzer.CSharp.dll` est fourni à la racine du dépôt.
 
-Ta mission : **corriger toutes les infractions S107 restantes**, et **réparer ce que la session précédente a mal fait sur ce sujet**, en respectant toutes les règles du fichier.
+Ta mission dans cette session : **reprendre le travail en cours sans le perdre**, puis **ramener toutes les méthodes à une complexité cognitive de 15 au maximum (S3776) et à 7 paramètres au maximum (S107)**, en respectant toutes les règles du fichier.
+
+Les consignes ci-dessous **remplacent** les sections 7.2 (point 1) et 9 (point 2) du fichier, **uniquement pour cette session**. Tout le reste du fichier s'applique.
 
 ## Étape 1 — Lecture
-- Lis `REFACTORING_TECHLEAD.md` **en entier**, de la première ligne jusqu'à la fin de l'annexe A. S'il est trop long pour être lu d'un coup, lis-le par morceaux successifs. Ne commence rien avant d'avoir tout lu.
-- Relis avec une attention particulière les sections 3 (et 3.5.1), 6.1, 6.2, 7.1 (point 6), 7.5, 7.6, 8, 11 et 12.
+- Lis `REFACTORING_TECHLEAD.md` **en entier**, jusqu'à la fin de l'annexe B, par morceaux si nécessaire. Ne commence rien avant d'avoir tout lu.
+- Relis avec attention les sections 3 (et 3.5.1), 5, 6.1, 6.2, 6.3, 7.1 (point 6), 7.4, 7.5, 7.6, 8, 9, 11 et 12.
 
-## Étape 2 — Préparation
-1. Place-toi sur la branche existante `refactor/sonar-cleanup` (`git checkout refactor/sonar-cleanup`). Ne crée pas de nouvelle branche.
-2. Lance `git status`. En dehors de `REFACTORING_TECHLEAD.md` et `.refactoring/`, l'arbre doit être propre. S'il reste des modifications non commitées de la session précédente, **arrête-toi** et liste-les. Ne les commite pas et ne les annule pas toi-même.
-3. Lance **telle quelle** la commande d'extraction du script de la section 7.1, point 6. La dernière ligne affichée doit commencer par `S107 :`.
-4. Identifie le point de départ de la branche : `git merge-base refactor/sonar-cleanup <branche principale>`, la branche principale étant `main`, `master` ou `develop` selon le dépôt. Lance `git log --oneline <merge-base>..HEAD` pour voir ce que la session précédente a fait.
-5. Fais l'état initial sur l'état **actuel** de la branche (section 7.2, points 2 à 5) : build Debug et Release, tests de toute la solution. Tout doit être vert avant de continuer ; sinon, arrête-toi et signale-le.
+## Étape 2 — Préparation des outils
+1. **Ne change pas de branche** : reste sur la branche courante (`git branch --show-current`). Si c'est la branche principale (`main`, `master` ou `develop`), arrête-toi et signale-le : le travail en cours ne doit pas être fait directement dessus.
+2. Lance **telle quelle** la commande de préparation de la section 7.1, point 6. Tu dois voir `Extrait : Find-TooManyParameters.ps1`, `Extrait : Invoke-SonarRules.ps1`, puis une ligne qui commence par `S107 :`.
+3. Vérifie que `SonarAnalyzer.CSharp.dll` est présent à la racine du dépôt. Ne le déplace pas, ne le modifie pas et ne le commite pas. S'il est absent et que le script ne peut pas le télécharger, arrête-toi et demande-moi de le déposer.
 
-## Étape 3 — Audit de la session précédente (S107 uniquement)
-Relis le diff `git diff <merge-base>..HEAD` et cherche les contournements de S107 interdits par la nouvelle version du fichier :
-- **Façades** : une ancienne signature à plus de 7 paramètres conservée et qui délègue à une nouvelle, alors que la méthode n'est **pas** un contrat externe au sens de 3.5.1. → Supprime la façade et mets à jour **tous** les appelants pour qu'ils utilisent la nouvelle signature.
-- **Objets paramètres fourre-tout** : un seul objet qui regroupe des paramètres sans cohérence métier, ou un objet construit lui-même avec plus de 7 arguments. → Regroupe par cohérence (section 6.1, « Comment construire l'objet paramètre »).
-- **Méthodes extraites** (Extract Method) qui ont elles-mêmes plus de 7 paramètres. → Revois le découpage.
-- **Tests affaiblis** lors d'une adaptation de signature : assertion, `Verify` ou `Times` modifiés, `It.IsAny` mis à la place d'une valeur précise. → Rétablis une vérification équivalente à l'originale.
+## Étape 3 — Sécuriser le travail en cours
+1. Lance `git status`. Ignore, qu'ils soient non suivis ou modifiés : `REFACTORING_TECHLEAD.md`, `.refactoring/`, `.vscode/`, `.vs/`, `.idea/`, `*.user`, `*.suo` et `SonarAnalyzer.CSharp.dll`.
+2. **S'il y a d'autres modifications non commitées** (le travail en cours) :
+   - ne les annule **pas** et ne les écrase **pas** ;
+   - lis le diff (`git diff` et `git diff --staged`) pour comprendre ce qui était en train d'être fait, et note-le ;
+   - lance le build Debug et Release, puis les tests de toute la solution ;
+   - **si tout est vert** : commite ces modifications telles quelles, en ajoutant les fichiers un par un, avec le message `refactor: sauvegarde du travail en cours avant analyse Sonar`. Ne commite aucun des fichiers ignorés du point 1 ;
+   - **si le build ou des tests sont rouges** : essaie de terminer ou de corriger ce travail en cours, en respectant les règles du fichier. Si c'est impossible en 2 tentatives, **arrête-toi** : ne commite rien, ne supprime rien, et rends-moi la liste des fichiers modifiés, les erreurs et ton analyse.
+3. Identifie le point de départ de la branche : `git merge-base HEAD <branche principale>`. Note-le, il servira à l'audit et au rapport.
+4. Fais l'état initial (section 7.2, points 2 à 5) sur cet état sauvegardé. Il est la référence « Initial » du rapport de cette session.
 
-Note chaque problème trouvé. Tu les corriges à l'étape 4, dans des commits dédiés : `refactor(<zone>): supprime la façade de <Methode> et met à jour les appelants (S107)`.
+## Étape 4 — Inventaire outillé
+1. Lance l'analyse Sonar (section 6.3) :
+   `powershell -NoProfile -ExecutionPolicy Bypass -File .\.refactoring\Invoke-SonarRules.ps1 -Rules S3776,S107 -OutCsv .\.refactoring\sonar-initial.csv`
+   La première ligne affichée doit indiquer l'analyseur `SonarAnalyzer.CSharp.dll` de la racine du dépôt, avec sa version. Recopie-la dans le rapport.
+2. Lance le script S107 (section 6.1) :
+   `powershell -NoProfile -ExecutionPolicy Bypass -File .\.refactoring\Find-TooManyParameters.ps1 -Root . -Max 7 -OutCsv .\.refactoring\s107-initial.csv`
+3. Construis ta liste de tâches :
+   - **toutes** les lignes S3776 de `sonar-initial.csv`, de la plus complexe à la moins complexe ;
+   - **toutes** les lignes S107, union de `sonar-initial.csv` et de `s107-initial.csv`, du plus grand nombre de paramètres au plus petit.
+   Affiche les deux nombres totaux avant de commencer.
 
-## Étape 4 — Traitement S107
-1. Lance le script de détection avec `-OutCsv .\.refactoring\s107-initial.csv` (section 6.1). Affiche le nombre de lignes trouvées.
-2. Ajoute **toutes** les lignes à ta liste de tâches, plus les problèmes trouvés à l'étape 3. Aucune ligne n'est ignorée ni regroupée sans être nommée.
-3. Traite-les de la déclaration qui a le plus de paramètres à celle qui en a le moins. Pour chacune :
-   - recherche **tous** les usages dans la solution, tests compris ;
-   - choisis le cas dans l'**arbre de décision de la section 6.1** ;
-   - si nécessaire, écris d'abord des tests de caractérisation (section 7.4) ;
-   - applique le refactoring et mets à jour **tous** les appelants, les implémentations d'interface, les `override` et les enregistrements DI ;
-   - adapte les tests selon la section 8, **sans toucher aux assertions** ;
-   - compile la solution, lance les tests du projet concerné, puis commite ;
-   - lance les tests de **toute** la solution après chaque changement de signature publique, d'interface ou d'enregistrement DI.
-4. Une méthode `public` ou `protected` appelée uniquement dans la solution **n'est pas** un contrat externe : tu changes sa signature, **sans façade**.
-5. Si un refactoring échoue après 2 tentatives, annule-le, note-le dans la dette avec la raison, et passe au suivant.
+## Étape 5 — Audit du travail déjà fait sur la branche
+Relis `git diff <merge-base>..HEAD` et cherche les contournements interdits par la version actuelle du fichier :
+- **façades** qui conservent une ancienne signature à plus de 7 paramètres pour une méthode qui n'est **pas** un contrat externe au sens de 3.5.1. Il faut supprimer la façade et mettre à jour tous les appelants ;
+- **objets paramètres fourre-tout**, ou construits eux-mêmes avec plus de 7 arguments ;
+- **méthodes extraites** qui dépassent 15 de complexité ou 7 paramètres (l'analyse Sonar les signale déjà) ;
+- **tests affaiblis** : assertion, `Verify`, `Times` modifiés, ou `It.IsAny` mis à la place d'une valeur précise. Il faut rétablir une vérification équivalente à l'originale.
 
-## Étape 5 — Contrôle de fin
-1. Relance le script avec `-OutCsv .\.refactoring\s107-final.csv`.
-2. Chaque ligne restante doit correspondre à un cas « non corrigeable » de l'arbre de décision : signature imposée par un type externe, DTO sérialisé, entité EF, contrat externe au sens de 3.5.1, ou action de contrôleur non convertible. **Toute autre ligne restante signifie que le travail n'est pas fini** : retourne à l'étape 4.
-3. Fais la vérification finale complète (section 11) : build Debug et Release, tests de toute la solution, relecture du diff de **cette session**, enregistrements DI, et absence de `REFACTORING_TECHLEAD.md` et de `.refactoring/` dans les commits.
+Ajoute chaque problème trouvé à ta liste de tâches.
 
-## Contraintes
-- Toutes les règles du fichier s'appliquent, en particulier : comportement strictement identique (3.1), aucun test supprimé ou affaibli (3.4), aucune suppression d'avertissement (7.6), aucun package ajouté (3.6).
-- Ne touche qu'à ce qui concerne S107 et aux problèmes de l'étape 3. Les autres règles Sonar ne font pas partie de cette session. Si tu en vois, liste-les dans la dette sans les corriger.
-- Ne modifie et ne commite ni `REFACTORING_TECHLEAD.md`, ni `.refactoring/`.
+## Étape 6 — Traitement
+Ordre de traitement :
+1. Les problèmes de l'audit (étape 5).
+2. Les S3776 (lot 2), en suivant la « Boucle de travail pour S3776 » de la section 6.3.
+3. Les S107 (lot 3), en suivant l'arbre de décision de la section 6.1.
+
+Pour chaque élément :
+- recherche tous les usages ;
+- écris des tests de caractérisation si la couverture est insuffisante (section 7.4) ;
+- refactorise sans changer le comportement (section 3.1) ;
+- adapte les tests sans toucher aux assertions (section 8) ;
+- build puis tests ;
+- **relance l'analyse Sonar** au moins une fois par fichier traité, pour vérifier les nouvelles valeurs. Tu peux utiliser `-Rules S3776` pour aller plus vite ;
+- commite :
+  - `refactor(<zone>): réduit la complexité cognitive de <Methode> de X à Y (S3776)`
+  - ou `refactor(<zone>): introduit <ObjetParametre> pour <Methode> (S107)`
+
+Si un refactoring échoue après 2 tentatives, annule-le, note la cause dans la dette et passe au suivant. Ne laisse **jamais** la solution dans un état cassé.
+
+## Étape 7 — Contrôle de fin (bloquant)
+1. Relance les deux outils, avec les sorties `.refactoring\sonar-final.csv` et `.refactoring\s107-final.csv`.
+2. Chaque S3776 restant doit avoir une justification **acceptable au sens de la section 6.3**. Chaque S107 restant doit correspondre à un cas « non corrigeable » de l'arbre de la section 6.1. **Toute autre ligne restante signifie que le travail n'est pas fini** : retourne à l'étape 6.
+3. Fais la vérification finale complète (section 11).
+
+## Contraintes de cette session
+- Ne traite que S3776, S107 et les problèmes de l'audit. Liste les autres problèmes Sonar que tu remarques dans la dette, sans les corriger.
+- Ne modifie et ne commite ni `REFACTORING_TECHLEAD.md`, ni `.refactoring/`, ni `SonarAnalyzer.CSharp.dll`, ni les fichiers d'éditeur.
 - Pas de push, pas de pull request.
 
 ## Rapport
-Termine par les sections suivantes de la section 12 :
-- **2** — État initial / final. « Initial » désigne l'état de la branche au début de **cette** session.
-- **3 bis** — Bilan S107, avec **toutes** les lignes de `s107-initial.csv`.
-- **4** — Nouveaux éléments créés.
-- **7** — Dette restante, avec **chaque** ligne de `s107-final.csv` justifiée.
-- **8** — Tests modifiés ou ajoutés.
-- **9** — Points de vigilance pour la revue.
-
-Ajoute une section **« Corrections de la session précédente »** : façades supprimées, objets paramètres regroupés, tests rétablis (fichier, problème, correction, commit).
+Termine par :
+- une section **« Travail en cours repris »** : ce qui était non commité au départ, ce que tu en as fait (commit de sauvegarde, corrections) ;
+- les sections 2, 3 bis (S107), 3 ter (S3776), 4, 7, 8 et 9 de la section 12, avec la ligne « Analyseur Sonar utilisé » remplie ;
+- une section **« Corrections du travail précédent »** : façades supprimées, objets paramètres regroupés, méthodes extraites corrigées, tests rétablis (fichier, problème, correction, commit).
