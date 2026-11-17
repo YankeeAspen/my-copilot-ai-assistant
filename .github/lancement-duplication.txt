@@ -1,0 +1,60 @@
+#file:DUPLICATION_TECHLEAD.md
+#file:REFACTORING_TECHLEAD.md
+
+Tu vas exécuter une mission de réduction du taux de duplication SonarQube. Les instructions sont dans deux fichiers à la racine du dépôt :
+- `DUPLICATION_TECHLEAD.md` : la mission, les outils, la méthode et le rapport ;
+- `REFACTORING_TECHLEAD.md` : les règles communes (non-régression, tests, contrats, DI, édition) et les outils d'analyse Sonar S3776/S107.
+
+## Étape 1 — Lecture obligatoire et complète
+- Lis `DUPLICATION_TECHLEAD.md` **en entier**, jusqu'à la fin de l'annexe D, par morceaux successifs si nécessaire.
+- Lis ensuite `REFACTORING_TECHLEAD.md` **en entier**, jusqu'à la fin de l'annexe B.
+- Ne commence rien avant d'avoir tout lu. Ces deux fichiers sont ta **seule source d'instructions** pour cette mission.
+
+## Étape 2 — Confirmation rapide (ne pas attendre ma réponse)
+Écris en 10 lignes maximum :
+- ton rôle ;
+- comment SonarQube mesure la duplication (seuils, ce qui est normalisé, ce qui est exclu) ;
+- les 5 règles les plus importantes de la mission, dont l'interdiction de masquer une duplication ;
+- les 3 lots dans l'ordre où tu vas les traiter ;
+- l'objectif et le périmètre (voir ci-dessous).
+
+Puis **enchaîne immédiatement** sur l'exécution, sans attendre de validation de ma part.
+
+## Étape 3 — Exécution
+Applique la méthode de `DUPLICATION_TECHLEAD.md` dans l'ordre : sections 6.1 (reconnaissance et outils), 6.2 (état initial et mesures), 6.3 (inventaire par familles), 6.4 (boucle de factorisation), 6.5 (contrôle de fin), 7 (rapport).
+
+Pendant l'exécution :
+- **Avant chaque nouveau lot**, relis les sections 2 et 5 de `DUPLICATION_TECHLEAD.md`, et les sections 3 et 7.6 de `REFACTORING_TECHLEAD.md`.
+- Tiens ta liste de tâches à jour (une tâche par famille de duplication).
+- Lance toi-même les commandes `dotnet`, `git` et les scripts de `.refactoring/` dans le terminal, et lis leurs résultats avant de continuer.
+- Ne passe jamais à l'étape suivante si le build ou les tests sont rouges.
+
+## Contraintes sur les fichiers d'instructions
+- Ne modifie, ne déplace et ne supprime ni `DUPLICATION_TECHLEAD.md` ni `REFACTORING_TECHLEAD.md`.
+- Ne les inclus dans **aucun** commit.
+- Ignore-les lors de la vérification « arbre de travail propre ».
+
+## Serveur SonarQube
+<!-- Remplir si le serveur est accessible depuis ce poste, sinon supprimer cette section.
+     Le jeton se positionne dans le terminal AVANT de lancer la session, jamais dans ce prompt :
+     $env:SONAR_TOKEN = "<jeton>" -->
+- URL : `<https://sonar.mon-entreprise.local>`
+- Clé du projet : `<cle-du-projet>`
+- Branche de référence : `<main>`
+
+## Objectif
+<!-- Choisir UNE option et supprimer l'autre -->
+- Densité de duplication de **3 % au maximum** (Quality Gate « Sonar way »).
+- Densité de duplication de **`<X>` % au maximum**.
+
+## Périmètre de cette session
+<!-- Choisir UNE option et supprimer les autres -->
+- Toute la solution.
+- Uniquement le(s) projet(s) : `<NomDuProjet>`
+- Uniquement le dossier : `<chemin/du/dossier>`
+- Uniquement les lots : `<A, B>`
+
+Les tests de **toute** la solution doivent rester verts, même si le périmètre est restreint. La densité se mesure sur le périmètre traité (`-Root`), mais aucune nouvelle duplication ne doit apparaître ailleurs.
+
+## Fin de mission
+Termine par le rapport final complet, au format exact de la section 7 de `DUPLICATION_TECHLEAD.md`.
