@@ -382,7 +382,10 @@ function Get-RangeCommits {
 function Split-NulOutput {
     param([string[]]$Lines)
     # Sortie -z : les champs sont séparés par NUL ; PowerShell a pu découper sur les sauts de ligne.
-    return ($Lines -join "`n").Split([char]0)
+    # On ne garde que les champs non vides. La virgule empêche PowerShell de "dérouler" le tableau :
+    # sans elle, un résultat vide ou à un seul élément devient $null ou une simple chaîne.
+    $fields = @(($Lines -join "`n").Split([char]0) | ForEach-Object { $_.Trim("`n") } | Where-Object { $_ -ne '' })
+    return , $fields
 }
 
 function Get-FileChanges {
@@ -509,9 +512,17 @@ function Write-ComSheet {
     for ($r = 0; $r -lt $Rows.Count; $r++) {
         for ($c = 0; $c -lt $props.Count; $c++) {
             $v = $Rows[$r].($props[$c])
+            # COM n'accepte que des types simples : on retire l'enveloppe PSObject (PS 5.1)
+            # et on ne transmet que des chaînes ou des nombres (double).
+            if ($v -is [System.Management.Automation.PSObject]) { $v = $v.PSObject.BaseObject }
             if ($null -eq $v) { $v = '' }
-            elseif ($v -is [string] -and $v -match '^[=+\-@]') { $v = "'$v" }   # évite l'interprétation en formule
             elseif ($v -is [bool]) { $v = if ($v) { 'Oui' } else { 'Non' } }
+            elseif ($v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal]) { $v = [double]$v }
+            else {
+                $v = [string]$v
+                if ($v.Length -gt 32000) { $v = $v.Substring(0, 32000) }   # limite d'une cellule Excel
+                if ($v -match '^[=+\-@]') { $v = "'$v" }                     # évite l'interprétation en formule
+            }
             $data[($r + 1), $c] = $v
         }
     }
@@ -722,7 +733,8 @@ try {
                 if (-not $SummaryOnly) { Write-ComparisonDetail -Summary $summary -Commits $commits -Files $files }
             }
             catch {
-                Write-Warning "[$repoName] comparaison $($t.Name) -> $Target en échec : $($_.Exception.Message)"
+                Write-Warning ("[{0}] comparaison {1} -> {2} en échec (ligne {3}) : {4}" -f $repoName, $t.Name, $Target, $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message)
+                Write-Host ("    Pile d'appels :`n" + ($_.ScriptStackTrace -replace '(?m)^', '      ')) -ForegroundColor DarkYellow
             }
         }
     }
@@ -766,6 +778,14 @@ try {
             Files   = $allFiles.ToArray()
         }
     }
+}
+catch {
+    # Erreur non prévue : on affiche la ligne exacte et la pile d'appels pour le diagnostic.
+    Write-Host ''
+    Write-Host ("ERREUR (ligne {0}) : {1}" -f $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message) -ForegroundColor Red
+    Write-Host ("  Instruction : {0}" -f $_.InvocationInfo.Line.Trim()) -ForegroundColor Red
+    Write-Host ("  Pile d'appels :`n" + ($_.ScriptStackTrace -replace '(?m)^', '    ')) -ForegroundColor DarkYellow
+    throw
 }
 finally {
     if ($previousEncoding) { try { [Console]::OutputEncoding = $previousEncoding } catch { } }
