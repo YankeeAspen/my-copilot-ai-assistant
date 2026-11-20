@@ -40,6 +40,16 @@
 .PARAMETER Fetch
     Exécute "git fetch --tags --prune" dans chaque dépôt avant la comparaison.
 
+.PARAMETER Pull
+    Met à jour la branche cible locale avant de comparer (inclut -Fetch). Équivalent sûr d'un
+    "git pull --ff-only" qui ne change jamais la branche courante (pas de checkout) :
+      - branche cible non extraite : avancée rapide de la référence locale sur origin/<Target> ;
+      - branche cible extraite : "git merge --ff-only", seulement si la copie de travail est propre ;
+      - branche locale divergente, modifications locales, ou branche extraite dans un autre worktree :
+        rien n'est modifié, un avertissement est affiché et la comparaison utilise origin/<Target>.
+    Le résultat de la mise à jour est consigné dans la colonne MiseAJourCible du résumé.
+    Sans effet si -Target est un tag (les tags sont mis à jour par le fetch).
+
 .PARAMETER UseRemoteBranch
     Privilégie origin/<Target> à la branche locale (utile si les branches locales ne sont pas à jour).
 
@@ -152,6 +162,14 @@
     Si origin/develop n'existe pas, la branche locale est utilisée.
 
 .EXAMPLE
+    .\Compare-GitTags.ps1 -Path D:\Sources -Tags v1.2.0 -Target develop -Pull
+
+    MISE À JOUR DE LA BRANCHE CIBLE : fetch puis avance la branche develop locale sur origin/develop
+    avant de comparer, sans checkout ni merge. Si develop a divergé ou contient des modifications non
+    commitées, rien n'est modifié et la comparaison se fait sur origin/develop (avertissement affiché).
+    Colonne MiseAJourCible : "À jour", "Mise à jour (+N commits)", "Divergente : origin utilisée"...
+
+.EXAMPLE
     .\Compare-GitTags.ps1 -Path D:\Sources -Tags v1.2.0 -Target develop -NoMerges
 
     SANS MERGES : exclut les commits de merge ("Merge branch ..."), pour ne garder que les commits
@@ -213,6 +231,8 @@ param(
 
     [switch]$Fetch,
 
+    [switch]$Pull,
+
     [switch]$UseRemoteBranch,
 
     [switch]$NoMerges,
@@ -273,6 +293,51 @@ function Get-TagDate {
     $r = Invoke-Git -Repo $Repo -Arguments @('for-each-ref', '--count=1', '--format=%(creatordate:unix)', "refs/tags/$Tag")
     if ($r.ExitCode -eq 0 -and $r.Output -and $r.Output[0].Trim() -match '^\d+$') { return [long]$r.Output[0].Trim() }
     return [long]0
+}
+
+function Update-TargetBranch {
+    <#
+        Avance la branche locale $Branch sur origin/$Branch en fast-forward uniquement.
+        Renvoie un objet { Statut ; UseRemote } : UseRemote = $true si la branche locale n'a pas pu
+        être mise à jour et que la comparaison doit se faire sur origin/$Branch.
+    #>
+    param([string]$Repo, [string]$Branch)
+
+    $result = { param($s, $remote) [pscustomobject]@{ Statut = $s; UseRemote = $remote } }
+
+    if (Get-CommitSha -Repo $Repo -Ref "refs/tags/$Branch") { return & $result 'Tag : non concerné' $false }
+    $remoteSha = Get-CommitSha -Repo $Repo -Ref "refs/remotes/origin/$Branch"
+    if (-not $remoteSha) { return & $result 'Pas de branche distante' $false }
+    $localSha = Get-CommitSha -Repo $Repo -Ref "refs/heads/$Branch"
+    if (-not $localSha) { return & $result 'Pas de branche locale : origin utilisée' $true }
+    if ($localSha -eq $remoteSha) { return & $result 'À jour' $false }
+
+    # Fast-forward possible uniquement si la branche locale est un ancêtre de la distante.
+    $anc = Invoke-Git -Repo $Repo -Arguments @('merge-base', '--is-ancestor', $localSha, $remoteSha)
+    if ($anc.ExitCode -ne 0) {
+        $ahead = Invoke-Git -Repo $Repo -Arguments @('merge-base', '--is-ancestor', $remoteSha, $localSha)
+        if ($ahead.ExitCode -eq 0) { return & $result 'En avance sur origin : locale utilisée' $false }
+        return & $result 'Divergente : origin utilisée' $true
+    }
+    $count = (Invoke-Git -Repo $Repo -Arguments @('rev-list', '--count', "$localSha..$remoteSha")).Output[0]
+
+    $current = (Invoke-Git -Repo $Repo -Arguments @('symbolic-ref', '--short', '-q', 'HEAD')).Output | Select-Object -First 1
+    if ($current -eq $Branch) {
+        # Branche extraite : on ne met à jour que si la copie de travail est propre.
+        $dirty = Invoke-Git -Repo $Repo -Arguments @('status', '--porcelain', '--untracked-files=no')
+        if ($dirty.Output | Where-Object { $_ }) { return & $result 'Modifications locales : origin utilisée' $true }
+        $m = Invoke-Git -Repo $Repo -Arguments @('merge', '--ff-only', '--quiet', $remoteSha)
+        if ($m.ExitCode -ne 0) { return & $result "Échec mise à jour : origin utilisée ($($m.Error))" $true }
+        return & $result "Mise à jour (+$count commits)" $false
+    }
+
+    # Branche non extraite ici : vérifier qu'elle ne l'est pas dans un autre worktree.
+    $wt = Invoke-Git -Repo $Repo -Arguments @('worktree', 'list', '--porcelain')
+    if ($wt.Output -contains "branch refs/heads/$Branch") { return & $result 'Extraite dans un autre worktree : origin utilisée' $true }
+
+    $u = Invoke-Git -Repo $Repo -Arguments @('update-ref', '-m', 'Compare-GitTags: fast-forward', "refs/heads/$Branch", $remoteSha, $localSha)
+    if ($u.ExitCode -ne 0) { return & $result "Échec mise à jour : origin utilisée ($($u.Error))" $true }
+    return & $result "Mise à jour (+$count commits)" $false
 }
 
 function Resolve-Target {
@@ -550,7 +615,7 @@ try {
         $dir = $repo.FullName
         $repoName = $repo.Name
 
-        if ($Fetch) {
+        if ($Fetch -or $Pull) {
             Write-Verbose "[$repoName] git fetch --tags --prune"
             $f = Invoke-Git -Repo $dir -Arguments @('fetch', '--tags', '--prune', '--quiet')
             if ($f.ExitCode -ne 0) { Write-Warning "[$repoName] fetch en échec : $($f.Error)" }
@@ -585,12 +650,27 @@ try {
             Write-Verbose "[$repoName] tag retenu : $($sorted[0].Name) ; ignorés : $ignoredTags"
         }
 
-        $targetRef = Resolve-Target -Repo $dir -Name $Target -PreferRemote $UseRemoteBranch.IsPresent
+        # Mise à jour de la branche cible (uniquement pour les dépôts qui seront comparés).
+        $updateStatus = ''
+        $preferRemote = $UseRemoteBranch.IsPresent
+        if ($Pull) {
+            $upd = Update-TargetBranch -Repo $dir -Branch $Target
+            $updateStatus = $upd.Statut
+            if ($upd.UseRemote) {
+                $preferRemote = $true
+                Write-Warning "[$repoName] branche '$Target' : $($upd.Statut)"
+            }
+            elseif (-not $SummaryOnly) {
+                Write-Host ("  Branche cible '{0}' : {1}" -f $Target, $upd.Statut) -ForegroundColor DarkCyan
+            }
+        }
+
+        $targetRef = Resolve-Target -Repo $dir -Name $Target -PreferRemote $preferRemote
         if (-not $targetRef) {
             Write-Warning "[$repoName] cible '$Target' introuvable : dépôt ignoré."
             foreach ($t in $foundTags) {
                 $summaries.Add([pscustomobject]@{
-                    Depot = $repoName; Tag = $t.Name; TagsIgnores = $ignoredTags; Cible = $Target; TypeCible = ''; Statut = 'Cible introuvable'
+                    Depot = $repoName; Tag = $t.Name; TagsIgnores = $ignoredTags; Cible = $Target; TypeCible = ''; MiseAJourCible = $updateStatus; Statut = 'Cible introuvable'
                     CommitsNouveaux = $null; CommitsAbsents = $null; Fichiers = $null
                     Ajoutes = $null; Modifies = $null; Supprimes = $null; Renommes = $null
                     LignesAjoutees = $null; LignesSupprimees = $null; ShaTag = $t.Sha.Substring(0, 10); ShaCible = ''
@@ -620,6 +700,7 @@ try {
                     TagsIgnores      = $ignoredTags
                     Cible            = $Target
                     TypeCible        = $targetRef.Type
+                    MiseAJourCible   = $updateStatus
                     Statut           = $statut
                     CommitsNouveaux  = @($commits | Where-Object { $_.Sens -eq 'Nouveau dans la cible' }).Count
                     CommitsAbsents   = @($commits | Where-Object { $_.Sens -eq 'Absent de la cible' }).Count
@@ -655,7 +736,9 @@ try {
     else {
         $columns = @('Depot', 'Tag')
         if ($LatestTagOnly) { $columns += @{ Label = 'Tags ignorés'; Expression = { $_.TagsIgnores } } }
-        $columns += @('Cible', 'Statut',
+        $columns += @('Cible')
+        if ($Pull) { $columns += @{ Label = 'Mise à jour cible'; Expression = { $_.MiseAJourCible } } }
+        $columns += @('Statut',
             @{ Label = 'Commits +'; Expression = { $_.CommitsNouveaux } },
             @{ Label = 'Commits -'; Expression = { $_.CommitsAbsents } },
             'Fichiers',
