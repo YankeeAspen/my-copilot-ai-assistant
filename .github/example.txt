@@ -31,6 +31,12 @@
 .PARAMETER ExcelPath
     Chemin du fichier Excel à générer (.xlsx ajouté si absent). Sans ce paramètre : console uniquement.
 
+.PARAMETER LatestTagOnly
+    Si plusieurs tags de -Tags existent dans un même dépôt, ne compare que le plus récent et ignore les
+    autres. "Plus récent" = date de création du tag (date du tag s'il est annoté, sinon date du commit).
+    À date égale, le tag placé le plus loin dans -Tags l'emporte. Sans ce paramètre, tous les tags
+    trouvés sont comparés. Les tags ignorés sont listés dans la colonne TagsIgnores du résumé.
+
 .PARAMETER Fetch
     Exécute "git fetch --tags --prune" dans chaque dépôt avant la comparaison.
 
@@ -64,6 +70,14 @@
     PLUSIEURS TAGS : chaque tag présent dans un dépôt est comparé séparément à develop.
     Un dépôt qui n'a que v1.3.0 ne produit qu'une comparaison ; un dépôt qui n'en a aucun est ignoré.
     Pratique quand les dépôts n'ont pas tous la même numérotation de version.
+
+.EXAMPLE
+    .\Compare-GitTags.ps1 -Path D:\Sources -Tags v1.2.0,v1.3.0,v2.0.0 -Target develop -LatestTagOnly
+
+    TAG LE PLUS RÉCENT UNIQUEMENT : dans chaque dépôt, seul le plus récent des tags trouvés est comparé
+    à develop. Un dépôt qui a v1.2.0 et v1.3.0 n'est comparé qu'avec v1.3.0 (v1.2.0 apparaît dans
+    TagsIgnores) ; un dépôt qui n'a que v1.2.0 est comparé avec v1.2.0.
+    Pratique pour "comparer la dernière version livrée de chaque dépôt à develop".
 
 .EXAMPLE
     .\Compare-GitTags.ps1 -Path D:\Sources -Tags "v1.2.0;v1.3.0 v2.0.0" -Target develop
@@ -195,6 +209,8 @@ param(
 
     [string]$ExcelPath,
 
+    [switch]$LatestTagOnly,
+
     [switch]$Fetch,
 
     [switch]$UseRemoteBranch,
@@ -249,6 +265,14 @@ function Get-CommitSha {
     $r = Invoke-Git -Repo $Repo -Arguments @('rev-parse', '--verify', '--quiet', "$Ref^{commit}")
     if ($r.ExitCode -eq 0 -and $r.Output) { return $r.Output[0].Trim() }
     return $null
+}
+
+function Get-TagDate {
+    param([string]$Repo, [string]$Tag)
+    # creatordate = date du tag (annoté) ou du commit (tag léger), en secondes Unix.
+    $r = Invoke-Git -Repo $Repo -Arguments @('for-each-ref', '--count=1', '--format=%(creatordate:unix)', "refs/tags/$Tag")
+    if ($r.ExitCode -eq 0 -and $r.Output -and $r.Output[0].Trim() -match '^\d+$') { return [long]$r.Output[0].Trim() }
+    return [long]0
 }
 
 function Resolve-Target {
@@ -532,9 +556,10 @@ try {
             if ($f.ExitCode -ne 0) { Write-Warning "[$repoName] fetch en échec : $($f.Error)" }
         }
 
-        $foundTags = @(foreach ($t in $tagList) {
+        $foundTags = @(for ($k = 0; $k -lt $tagList.Count; $k++) {
+            $t = $tagList[$k]
             $sha = Get-CommitSha -Repo $dir -Ref "refs/tags/$t"
-            if ($sha) { [pscustomobject]@{ Name = $t; Sha = $sha } }
+            if ($sha) { [pscustomobject]@{ Name = $t; Sha = $sha; Index = $k } }
         })
         if ($foundTags.Count -eq 0) {
             $reposWithoutTag.Add($repoName)
@@ -547,12 +572,25 @@ try {
             Write-Host ("=== {0} ===" -f $repoName) -ForegroundColor Yellow
         }
 
+        # Mode "tag le plus récent" : on ne garde que le tag de date la plus récente.
+        $ignoredTags = ''
+        if ($LatestTagOnly -and $foundTags.Count -gt 1) {
+            foreach ($t in $foundTags) { $t | Add-Member -NotePropertyName Date -NotePropertyValue (Get-TagDate -Repo $dir -Tag $t.Name) }
+            $sorted = @($foundTags | Sort-Object -Property @{ Expression = 'Date'; Descending = $true }, @{ Expression = 'Index'; Descending = $true })
+            $foundTags = @($sorted[0])
+            $ignoredTags = (@($sorted | Select-Object -Skip 1 | ForEach-Object { $_.Name }) -join ', ')
+            if (-not $SummaryOnly) {
+                Write-Host ("  Tag le plus récent retenu : {0}   (ignoré(s) : {1})" -f $sorted[0].Name, $ignoredTags) -ForegroundColor DarkCyan
+            }
+            Write-Verbose "[$repoName] tag retenu : $($sorted[0].Name) ; ignorés : $ignoredTags"
+        }
+
         $targetRef = Resolve-Target -Repo $dir -Name $Target -PreferRemote $UseRemoteBranch.IsPresent
         if (-not $targetRef) {
             Write-Warning "[$repoName] cible '$Target' introuvable : dépôt ignoré."
             foreach ($t in $foundTags) {
                 $summaries.Add([pscustomobject]@{
-                    Depot = $repoName; Tag = $t.Name; Cible = $Target; TypeCible = ''; Statut = 'Cible introuvable'
+                    Depot = $repoName; Tag = $t.Name; TagsIgnores = $ignoredTags; Cible = $Target; TypeCible = ''; Statut = 'Cible introuvable'
                     CommitsNouveaux = $null; CommitsAbsents = $null; Fichiers = $null
                     Ajoutes = $null; Modifies = $null; Supprimes = $null; Renommes = $null
                     LignesAjoutees = $null; LignesSupprimees = $null; ShaTag = $t.Sha.Substring(0, 10); ShaCible = ''
@@ -579,6 +617,7 @@ try {
                 $summary = [pscustomobject]@{
                     Depot            = $repoName
                     Tag              = $t.Name
+                    TagsIgnores      = $ignoredTags
                     Cible            = $Target
                     TypeCible        = $targetRef.Type
                     Statut           = $statut
@@ -614,13 +653,14 @@ try {
         Write-Host 'Aucune comparaison effectuée (aucun des tags demandés n''existe dans les dépôts).' -ForegroundColor DarkYellow
     }
     else {
-        $summaries |
-            Format-Table Depot, Tag, Cible, Statut,
-                @{ Label = 'Commits +'; Expression = { $_.CommitsNouveaux } },
-                @{ Label = 'Commits -'; Expression = { $_.CommitsAbsents } },
-                Fichiers,
-                @{ Label = 'Lignes'; Expression = { if ($null -ne $_.LignesAjoutees) { "+$($_.LignesAjoutees) / -$($_.LignesSupprimees)" } } } -AutoSize |
-            Out-Host
+        $columns = @('Depot', 'Tag')
+        if ($LatestTagOnly) { $columns += @{ Label = 'Tags ignorés'; Expression = { $_.TagsIgnores } } }
+        $columns += @('Cible', 'Statut',
+            @{ Label = 'Commits +'; Expression = { $_.CommitsNouveaux } },
+            @{ Label = 'Commits -'; Expression = { $_.CommitsAbsents } },
+            'Fichiers',
+            @{ Label = 'Lignes'; Expression = { if ($null -ne $_.LignesAjoutees) { "+$($_.LignesAjoutees) / -$($_.LignesSupprimees)" } } })
+        $summaries | Format-Table -Property $columns -AutoSize | Out-Host
     }
     if ($reposWithoutTag.Count -gt 0) {
         Write-Host ("Dépôts sans aucun des tags demandés ({0}) : {1}" -f $reposWithoutTag.Count, ($reposWithoutTag -join ', ')) -ForegroundColor DarkGray
